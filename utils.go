@@ -1,30 +1,24 @@
 package broker
 
 import (
-	"io"
-
-	amqp "github.com/rabbitmq/amqp091-go"
+	"crypto/md5"
+	"encoding/hex"
+	"fmt"
 )
 
-type endpoint interface {
-	io.Closer
-	// last-known running connection (may change after reconnect)
-	Connection() *amqp.Connection
-	// last-known running channel (may change after reconnect)
-	Channel() *amqp.Channel
+func hash(value interface{}) string {
+	text := fmt.Sprintf("%#v", value)
+	hash := md5.Sum([]byte(text))
+	return hex.EncodeToString(hash[:])
 }
 
-type releaseFunc func(bad bool)
-type resourceWrapper[T any] struct {
-	resource *T
-	release  releaseFunc
-}
-
-var defaultExchangeType = "direct"
-
-func defaultExchangeTypeFallback(kind string) string {
-	if kind != "" {
-		return kind
+func cloneMap[T ~map[string]interface{}](src T) T {
+	if src == nil {
+		return nil
 	}
-	return defaultExchangeType
+	dst := make(T, len(src))
+	for k, v := range src {
+		dst[k] = v
+	}
+	return dst
 }
