@@ -8,19 +8,28 @@ import (
 	amqp "github.com/rabbitmq/amqp091-go"
 )
 
-// connectionPool creates and reuses *amqp.Connection objects.
-// It is used by publishers to get dedicated connections.
+// newConnection establishes a new AMQP connection to the given URL.
+func newConnection(url string) (*amqp.Connection, error) {
+	conn, err := amqp.Dial(url)
+	if err != nil {
+		return nil, fmt.Errorf("dial connection: %w", err)
+	}
+	return conn, nil
+}
+
+// connectionPool manages a pool of AMQP connections for reuse.
 type connectionPool struct {
 	url     string
-	current chan *resourceWrapper[amqp.Connection] // changed from *amqp.Connection
+	current chan *resourceWrapper[amqp.Connection]
 	max     atomic.Int32
 	total   atomic.Int32
 	closed  atomic.Bool
 }
 
+// newConnectionPool creates a new connection pool with the specified maximum size.
 func newConnectionPool(url string, max int) *connectionPool {
 	if max <= 0 {
-		max = 4
+		max = defaultConnPoolSize
 	}
 	cp := &connectionPool{
 		url:     url,
@@ -30,14 +39,18 @@ func newConnectionPool(url string, max int) *connectionPool {
 	return cp
 }
 
-func (p *connectionPool) Get(ctx context.Context) (*amqp.Connection, releaseFunc, error) {
+// Get retrieves a connection from the pool or creates a new one.
+// Returns the connection, a release function, and any error.
+func (p *connectionPool) get(ctx context.Context) (*amqp.Connection, releaseFunc, error) {
 	select {
 	case rw := <-p.current:
 		return rw.resource, p.makeRelease(rw), nil
 	default:
+		// Try to create a new connection if under limit
 		for {
 			curr := p.total.Load()
 			if curr >= p.max.Load() {
+				// Wait for available connection
 				select {
 				case w := <-p.current:
 					return w.resource, p.makeRelease(w), nil
@@ -53,7 +66,7 @@ func (p *connectionPool) Get(ctx context.Context) (*amqp.Connection, releaseFunc
 				}
 				rw := &resourceWrapper[amqp.Connection]{
 					resource: conn,
-					release:  func(bad bool) {},
+					release:  func(bad bool) { /* noop */ },
 				}
 				return conn, p.makeRelease(rw), nil
 			}
@@ -61,6 +74,7 @@ func (p *connectionPool) Get(ctx context.Context) (*amqp.Connection, releaseFunc
 	}
 }
 
+// makeRelease creates a release function for a connection wrapper.
 func (p *connectionPool) makeRelease(rw *resourceWrapper[amqp.Connection]) releaseFunc {
 	return func(bad bool) {
 		if rw == nil || rw.resource == nil {
@@ -80,7 +94,8 @@ func (p *connectionPool) makeRelease(rw *resourceWrapper[amqp.Connection]) relea
 	}
 }
 
-func (p *connectionPool) Close() {
+// close drains and closes all connections in the pool.
+func (p *connectionPool) close() {
 	if !p.closed.CompareAndSwap(false, true) {
 		return
 	}

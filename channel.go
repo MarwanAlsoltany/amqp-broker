@@ -8,8 +8,17 @@ import (
 	amqp "github.com/rabbitmq/amqp091-go"
 )
 
-// channelPool builds channels by borrowing connections from connPool.
-// When a channel is returned the underlying connection release function is called only when channel is closed/bad.
+// newChannel creates a new AMQP channel from the given connection.
+func newChannel(conn *amqp.Connection) (*amqp.Channel, error) {
+	ch, err := conn.Channel()
+	if err != nil {
+		return nil, fmt.Errorf("create channel: %w", err)
+	}
+	return ch, nil
+}
+
+// channelPool manages a pool of AMQP channels for reuse.
+// Channels are created from connections borrowed from the connection pool.
 type channelPool struct {
 	connPool *connectionPool
 	pool     chan *resourceWrapper[amqp.Channel]
@@ -18,10 +27,10 @@ type channelPool struct {
 	closed   atomic.Bool
 }
 
-// newChannelPool uses the provided connectionPool to create channels on demand.
+// newChannelPool creates a new channel pool using the provided connection pool.
 func newChannelPool(connPool *connectionPool, max int) *channelPool {
 	if max <= 0 {
-		max = 8
+		max = defaultChPoolSize
 	}
 	cp := &channelPool{
 		connPool: connPool,
@@ -31,15 +40,18 @@ func newChannelPool(connPool *connectionPool, max int) *channelPool {
 	return cp
 }
 
-// Get returns an *amqp.Channel and a release function (bad bool).
-func (p *channelPool) Get(ctx context.Context) (*amqp.Channel, releaseFunc, error) {
+// Get retrieves a channel from the pool or creates a new one.
+// Returns the channel, a release function, and any error.
+func (p *channelPool) get(ctx context.Context) (*amqp.Channel, releaseFunc, error) {
 	select {
 	case rw := <-p.pool:
 		return rw.resource, p.makeRelease(rw), nil
 	default:
+		// Try to create a new channel if under limit
 		for {
 			curr := p.total.Load()
 			if curr >= p.max.Load() {
+				// Wait for available channel
 				select {
 				case w := <-p.pool:
 					return w.resource, p.makeRelease(w), nil
@@ -48,15 +60,14 @@ func (p *channelPool) Get(ctx context.Context) (*amqp.Channel, releaseFunc, erro
 				}
 			}
 			if p.total.CompareAndSwap(curr, curr+1) {
-				// create new channel by borrowing a connection
-				conn, relConn, err := p.connPool.Get(ctx)
+				// Borrow connection from pool
+				conn, relConn, err := p.connPool.get(ctx)
 				if err != nil {
 					p.total.Add(-1)
 					return nil, nil, fmt.Errorf("channel pool: get connection: %w", err)
 				}
 				ch, err := conn.Channel()
 				if err != nil {
-					// release connection as bad
 					relConn(true)
 					p.total.Add(-1)
 					return nil, nil, fmt.Errorf("channel pool: create channel: %w", err)
@@ -71,6 +82,7 @@ func (p *channelPool) Get(ctx context.Context) (*amqp.Channel, releaseFunc, erro
 	}
 }
 
+// makeRelease creates a release function for a channel wrapper.
 func (p *channelPool) makeRelease(rw *resourceWrapper[amqp.Channel]) releaseFunc {
 	return func(bad bool) {
 		if rw == nil || rw.resource == nil {
@@ -78,14 +90,13 @@ func (p *channelPool) makeRelease(rw *resourceWrapper[amqp.Channel]) releaseFunc
 		}
 		if p.closed.Load() || bad {
 			_ = rw.resource.Close()
-			// release connection as bad if channel bad
 			if rw.release != nil {
 				rw.release(bad)
 			}
 			p.total.Add(-1)
 			return
 		}
-		// return to pool or close if pool full
+		// Return to pool or close if full
 		select {
 		case p.pool <- rw:
 		default:
@@ -98,7 +109,8 @@ func (p *channelPool) makeRelease(rw *resourceWrapper[amqp.Channel]) releaseFunc
 	}
 }
 
-func (p *channelPool) Close() {
+// close drains and closes all channels in the pool.
+func (p *channelPool) close() {
 	if !p.closed.CompareAndSwap(false, true) {
 		return
 	}
