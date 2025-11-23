@@ -17,28 +17,25 @@ import (
 type Publisher interface {
 	Endpoint
 	// Publish sends a message to the specified exchange with the given routing key.
-	Publish(ctx context.Context, rk RoutingKey, msgs []Message, opts *PublishOptions) error
-}
-
-// PublishOptions configures publishing behavior at the broker/channel level.
-// Message-level options (DeliveryMode, Headers, etc.) are set on Message itself.
-type PublishOptions struct {
-	// Mandatory causes the server to return unroute-able messages to the publisher.
-	Mandatory bool
-	// Immediate causes messages that cannot be immediately delivered to be returned.
-	// Note: RabbitMQ 3.0+ removed support for this flag.
-	Immediate bool
-	// WaitForConfirm enables publisher confirmation for the message.
-	WaitForConfirm bool
-	// ConfirmTimeout is the maximum time to wait for confirmation.
-	// Default: defaultConfirmTimeout
-	ConfirmTimeout time.Duration
+	Publish(ctx context.Context, rk RoutingKey, msgs ...Message) error
 }
 
 // PublisherOptions configures Publisher behavior.
 type PublisherOptions struct {
 	// ConfirmMode enables publisher confirmations (recommended for reliable publishing).
 	ConfirmMode bool
+	// ConfirmTimeout is the maximum time to wait for confirmation.
+	// Only used if ConfirmMode is enabled.
+	// Default: defaultConfirmTimeout
+	ConfirmTimeout time.Duration
+	// Mandatory causes the server to return un-routable messages.
+	// Returned messages are delivered via OnReturn callback.
+	// Default: false
+	Mandatory bool
+	// Immediate causes messages that cannot be immediately delivered to be returned.
+	// Note: RabbitMQ 3.0+ removed support for this flag.
+	// Default: false
+	Immediate bool
 	// NoAutoReconnect disables automatic reconnection on connection failure.
 	// Default: false
 	NoAutoReconnect bool
@@ -52,45 +49,50 @@ type PublisherOptions struct {
 	// Only used if NoWaitForReady is false.
 	// Default: defaultReadyTimeout
 	ReadyTimeout time.Duration
+	// OnReturn is called when a mandatory or immediate publish is undeliverable.
+	// The Return contains the failed Publishing and error details.
+	// If nil, returned messages are silently discarded.
+	OnReturn func(Message)
+	// OnFlow is called when the server sends flow control notifications.
+	// active=true means publishing can resume, active=false means publishing is paused.
+	// If nil, flow control changes are handled internally without notification.
+	OnFlow func(active bool)
+	// OnError is called when errors occur in background goroutines that cannot be returned.
+	// This includes channel close errors during reconnection monitoring.
+	// If nil, errors are silently ignored.
+	OnError func(err error)
 }
 
 // publisher manages the lifecycle and state of a Publisher.
 type publisher struct {
-	id       string
-	broker   *Broker
+	*endpoint
 	opts     PublisherOptions
 	exchange Exchange
-	/* runtime state */
-	stateMu     sync.RWMutex
-	conn        *amqp.Connection
-	relConn     releaseFunc
-	ch          *amqp.Channel
-	ready       atomic.Bool
-	readyCh     chan struct{}
-	reconnectCh chan struct{}
-	closed      atomic.Bool
-	cancelFn    context.CancelFunc
-	// serialize publishes to avoid concurrent channel usage
-	mu sync.Mutex
+	// flow control state
+	flow   atomic.Bool
+	flowCh <-chan bool
 	// confirmation channel (if ConfirmMode enabled)
-	confCh <-chan amqp.Confirmation
-}
-
-func newPublisher(b *Broker, id string, opts PublisherOptions, e Exchange) *publisher {
-	return &publisher{
-		id:          id,
-		broker:      b,
-		opts:        opts,
-		exchange:    e,
-		reconnectCh: make(chan struct{}, 1),
-		readyCh:     make(chan struct{}),
-	}
+	confirmCh <-chan amqp.Confirmation
+	// return channel for undeliverable messages
+	returnCh <-chan amqp.Return
+	// serialize publishes to avoid concurrent channel usage
+	publishMu sync.Mutex
 }
 
 var _ Publisher = (*publisher)(nil)
 
+func newPublisher(b *Broker, id string, opts PublisherOptions, e Exchange) *publisher {
+	p := &publisher{
+		endpoint: newEndpoint(id, b, rolePublisher),
+		opts:     opts,
+		exchange: e,
+	}
+	p.flow.Store(true) // Start with flow active
+	return p
+}
+
 // Publish sends a message to the specified exchange with the given routing key.
-func (p *publisher) Publish(ctx context.Context, rk RoutingKey, msgs []Message, opts *PublishOptions) error {
+func (p *publisher) Publish(ctx context.Context, rk RoutingKey, msgs ...Message) error {
 	if p.closed.Load() {
 		return errors.New("publisher closed")
 	}
@@ -100,34 +102,32 @@ func (p *publisher) Publish(ctx context.Context, rk RoutingKey, msgs []Message, 
 	}
 
 	// Serialize publishes to avoid concurrent channel usage
-	p.mu.Lock()
-	defer p.mu.Unlock()
+	p.publishMu.Lock()
+	defer p.publishMu.Unlock()
 
-	ch := p.Channel()
+	// Check flow control state
+	if !p.flow.Load() {
+		return errors.New("publisher flow paused by server")
+	}
+
+	ch := p.endpoint.Channel()
 	if ch == nil {
 		return errors.New("publisher not connected")
 	}
 
-	pubOps := defaultPublishOptions()
-	if opts != nil {
-		pubOps = *opts
-	}
-
-	err := p.broker.ensureExchangeDeclared(ch, p.exchange, true)
+	err := p.endpoint.broker.declareExchange(ch, p.exchange)
 	if err != nil {
 		return fmt.Errorf("ensure exchange declared: %w", err)
-	}
-
-	// Publish all messages
+	} // Publish all messages
 	for i, msg := range msgs {
-		pub := messageToPublishing(&msg)
+		pub := publishingFromMessage(&msg)
 
 		err := ch.PublishWithContext(
 			ctx,
 			p.exchange.Name,
 			string(rk),
-			pubOps.Mandatory,
-			pubOps.Immediate,
+			p.opts.Mandatory,
+			p.opts.Immediate,
 			pub,
 		)
 		if err != nil {
@@ -138,13 +138,13 @@ func (p *publisher) Publish(ctx context.Context, rk RoutingKey, msgs []Message, 
 	// Wait for all confirmations if enabled
 	if p.opts.ConfirmMode {
 		p.stateMu.RLock()
-		confCh := p.confCh
+		confCh := p.confirmCh
 		p.stateMu.RUnlock()
 		if confCh == nil {
 			return errors.New("confirmation channel not available")
 		}
 
-		timeout := pubOps.ConfirmTimeout
+		timeout := p.opts.ConfirmTimeout
 		if timeout <= 0 {
 			timeout = defaultConfirmTimeout
 		}
@@ -167,33 +167,6 @@ func (p *publisher) Publish(ctx context.Context, rk RoutingKey, msgs []Message, 
 	return nil
 }
 
-// Connection returns the current connection (may be nil).
-func (p *publisher) Connection() *amqp.Connection {
-	p.stateMu.RLock()
-	defer p.stateMu.RUnlock()
-	return p.conn
-}
-
-// Channel returns the current channel (may be nil).
-func (p *publisher) Channel() *amqp.Channel {
-	p.stateMu.RLock()
-	defer p.stateMu.RUnlock()
-	return p.ch
-}
-
-// Close stops the publisher and releases resources.
-func (p *publisher) Close() error {
-	if !p.closed.CompareAndSwap(false, true) {
-		return nil
-	}
-	p.stateMu.Lock()
-	if p.cancelFn != nil {
-		p.cancelFn()
-	}
-	p.stateMu.Unlock()
-	return nil
-}
-
 // Unregister removes the publisher from the broker's registry and closes it.
 func (p *publisher) Unregister() {
 	if p.broker == nil {
@@ -208,57 +181,35 @@ func (p *publisher) Unregister() {
 // run is the main goroutine for the publisher.
 func (p *publisher) run() {
 	ctx, cancel := context.WithCancel(p.broker.ctx)
-	p.stateMu.Lock()
-	p.cancelFn = cancel
-	p.stateMu.Unlock()
-
 	defer func() {
-		p.cleanup()
+		cancel()
+		p.disconnect()
 	}()
 
-	noAutoReconnect := p.opts.NoAutoReconnect
+	autoReconnect := !p.opts.NoAutoReconnect
 	reconnectDelay := p.opts.ReconnectDelay
 	if reconnectDelay <= 0 {
 		reconnectDelay = defaultReconnectDelay
 	}
 
-	for {
-		if p.closed.Load() {
-			return
-		}
-
-		// Connect
-		if err := p.connect(ctx); err != nil {
-			if errors.Is(err, context.Canceled) {
-				return
-			}
-			if noAutoReconnect {
-				return
-			}
-			time.Sleep(reconnectDelay)
-			continue
-		}
-
-		// Mark ready
-		p.ready.Store(true)
-		select {
-		case <-p.readyCh:
-		default:
-			close(p.readyCh)
-		}
-	}
+	p.makeReady(
+		ctx,
+		autoReconnect,
+		reconnectDelay,
+		p.connect,
+		p.monitor,
+	)
 }
 
-// connect establishes a connection and channel for the publisher.
+// connect establishes a connection and channel for publishing.
 func (p *publisher) connect(ctx context.Context) error {
-	conn, relConn, err := p.broker.connPool.get(ctx)
+	conn, err := p.broker.connMgr.assign(ctx, p.role)
 	if err != nil {
-		return fmt.Errorf("get connection: %w", err)
+		return fmt.Errorf("assign connection: %w", err)
 	}
 
 	ch, err := conn.Channel()
 	if err != nil {
-		relConn(true)
 		return fmt.Errorf("open channel: %w", err)
 	}
 
@@ -266,23 +217,37 @@ func (p *publisher) connect(ctx context.Context) error {
 	if p.opts.ConfirmMode {
 		if err := ch.Confirm(false); err != nil {
 			_ = ch.Close()
-			relConn(true)
 			return fmt.Errorf("enable confirm: %w", err)
 		}
+		// NotifyPublish is used to preserve strict ordering of acks/nacks.
+		// Alternative: NotifyConfirm returns separate ack/nack channels:
+		// ackCh, nackCh := ch.NotifyConfirm(make(chan uint64), make(chan uint64))
+		// However, NotifyConfirm may lose ordering when acks and nacks are interleaved.
 		confCh = ch.NotifyPublish(make(chan amqp.Confirmation, 1))
 	}
 
+	// Set up return notification for undeliverable messages
+	returnCh := ch.NotifyReturn(make(chan amqp.Return, 100))
+
+	// Set up flow control notification
+	flowCh := ch.NotifyFlow(make(chan bool, 1))
+
 	p.stateMu.Lock()
 	p.conn = conn
-	p.relConn = relConn
 	p.ch = ch
-	p.confCh = confCh
+	p.confirmCh = confCh
+	p.returnCh = returnCh
+	p.flowCh = flowCh
 	p.stateMu.Unlock()
+
+	// Start background handlers
+	go p.handleReturns(ctx)
+	go p.handleFlow(ctx)
 
 	return nil
 }
 
-// disconnect closes the channel and releases the connection.
+// disconnect closes the channel and clears publisher-specific state.
 func (p *publisher) disconnect() {
 	p.ready.Store(false)
 
@@ -291,49 +256,86 @@ func (p *publisher) disconnect() {
 		_ = p.ch.Close()
 		p.ch = nil
 	}
-	if p.relConn != nil {
-		p.relConn(false)
-		p.relConn = nil
-	}
-	p.conn = nil
-	p.confCh = nil
+	// Clear publisher-specific channels
+	p.confirmCh = nil
+	p.returnCh = nil
+	p.flowCh = nil
 	p.stateMu.Unlock()
 }
 
-// reconnect signals the publisher to reconnect.
-func (p *publisher) reconnect() {
-	select {
-	case p.reconnectCh <- struct{}{}:
-	default:
-	}
-}
-
-// cleanup performs final cleanup when the publisher goroutine exits.
-func (p *publisher) cleanup() {
-	p.disconnect()
-	p.stateMu.Lock()
-	if p.cancelFn != nil {
-		p.cancelFn()
-		p.cancelFn = nil
-	}
-	p.stateMu.Unlock()
-}
-
-// waitReady blocks until the publisher is ready or context is done.
-func (p *publisher) waitReady(ctx context.Context) bool {
-	if p.ready.Load() {
-		return true
-	}
-	p.stateMu.RLock()
-	ch := p.readyCh
-	p.stateMu.RUnlock()
+// monitor watches for channel closures.
+func (p *publisher) monitor(ctx context.Context) error {
+	ch := p.Channel()
 	if ch == nil {
-		return false
+		return errors.New("channel not available")
 	}
+
+	closeCh := ch.NotifyClose(make(chan *amqp.Error, 1))
+
 	select {
-	case <-ch:
-		return true
 	case <-ctx.Done():
-		return false
+		return ctx.Err()
+	case err := <-closeCh:
+		if err != nil && p.opts.OnError != nil {
+			p.opts.OnError(fmt.Errorf("channel closed: %w", err))
+		}
+		p.disconnect()
+		return err
+	}
+}
+
+// handleReturns processes undeliverable messages returned by the server.
+func (p *publisher) handleReturns(ctx context.Context) {
+	for {
+		p.stateMu.RLock()
+		returnCh := p.returnCh
+		p.stateMu.RUnlock()
+
+		if returnCh == nil {
+			return
+		}
+
+		select {
+		case <-ctx.Done():
+			return
+		case r, ok := <-returnCh:
+			if !ok {
+				return
+			}
+			// Call user callback if provided
+			if p.opts.OnReturn != nil {
+				msg := returnToMessage(&r)
+				msg.broker = p.broker
+				p.opts.OnReturn(msg)
+			}
+			// Otherwise silently discard (could log here)
+		}
+	}
+}
+
+// handleFlow processes flow control notifications from the server.
+func (p *publisher) handleFlow(ctx context.Context) {
+	for {
+		p.stateMu.RLock()
+		flowCh := p.flowCh
+		p.stateMu.RUnlock()
+
+		if flowCh == nil {
+			return
+		}
+
+		select {
+		case <-ctx.Done():
+			return
+		case active, ok := <-flowCh:
+			if !ok {
+				return
+			}
+			p.flow.Store(active)
+			// Notify user if callback is provided
+			if p.opts.OnFlow != nil {
+				p.opts.OnFlow(active)
+			}
+		}
 	}
 }
