@@ -38,6 +38,9 @@ const (
 	// Default confirmation timeout
 	defaultConfirmTimeout = 5 * time.Second
 
+	// Default concurrent handlers for consumers
+	defaultConcurrentHandlers = 0 // unlimited
+
 	// Default exchange kind
 	defaultExchangeType = "direct"
 
@@ -91,13 +94,14 @@ func defaultPublisherOptions() PublisherOptions {
 // defaultConsumerOptions returns ConsumeOptions with defaults applied.
 func defaultConsumerOptions() ConsumerOptions {
 	return ConsumerOptions{
-		AutoAck:         false,
-		PrefetchCount:   defaultPrefetchCount,
-		NoWait:          false,
-		Exclusive:       false,
-		NoWaitForReady:  false,
-		ReadyTimeout:    defaultReadyTimeout,
-		NoAutoReconnect: false,
-		ReconnectDelay:  defaultReconnectDelay,
+		AutoAck:               false,
+		PrefetchCount:         defaultPrefetchCount,
+		NoWait:                false,
+		Exclusive:             false,
+		NoWaitForReady:        false,
+		ReadyTimeout:          defaultReadyTimeout,
+		NoAutoReconnect:       false,
+		ReconnectDelay:        defaultReconnectDelay,
+		MaxConcurrentHandlers: defaultConcurrentHandlers,
 	}
 }
