@@ -9,11 +9,36 @@ import (
 	amqp "github.com/rabbitmq/amqp091-go"
 )
 
-// newConnection establishes a new AMQP connection to the given URL.
-func newConnection(url string) (*amqp.Connection, error) {
-	conn, err := amqp.Dial(url)
+// Handler types for connection events
+type (
+	// ConnectionOpenHandler is called when a connection is established or re-established.
+	// Parameters: idx (connection pool index)
+	ConnectionOpenHandler func(idx int)
+
+	// ConnectionCloseHandler is called when a connection closes.
+	// Parameters: idx (connection pool index), code (AMQP error code), reason (error description),
+	// server (true if initiated by server), recover (true if recoverable)
+	ConnectionCloseHandler func(idx int, code int, reason string, server bool, recover bool)
+
+	// ConnectionBlockHandler is called when connection flow control changes.
+	// Parameters: idx (connection pool index), active (true=blocked, false=unblocked),
+	// reason (blocking reason, only set when active=true)
+	ConnectionBlockHandler func(idx int, active bool, reason string)
+)
+
+// newConnection establishes a new AMQP connection using the provided config.
+func newConnection(url string, config *Config) (*Connection, error) {
+	var conn *Connection
+	var err error
+
+	if config == nil {
+		conn, err = amqp.Dial(url)
+	} else {
+		conn, err = amqp.DialConfig(url, *config)
+	}
+
 	if err != nil {
-		return nil, fmt.Errorf("dial connection: %w", err)
+		return nil, wrapError("dial connection", err)
 	}
 	return conn, nil
 }
@@ -23,7 +48,8 @@ func newConnection(url string) (*amqp.Connection, error) {
 type connectionManager struct {
 	url    string
 	size   int
-	conns  []*amqp.Connection
+	cfg    *Config
+	pool   []*Connection
 	connMu sync.RWMutex
 	// Round-robin counters for assignment within role groups
 	publisherIdx atomic.Uint32
@@ -32,19 +58,71 @@ type connectionManager struct {
 	// Cancellation for monitoring goroutines
 	ctx    context.Context
 	cancel context.CancelFunc
+	// Event handlers
+	openHandler  ConnectionOpenHandler
+	closeHandler ConnectionCloseHandler
+	blockHandler ConnectionBlockHandler
+	handlersMu   sync.RWMutex
 }
 
 // newConnectionManager creates a new connection manager with the specified size.
 // Size determines how many long-lived connections are maintained.
-func newConnectionManager(url string, size int) *connectionManager {
+func newConnectionManager(url string, cfg *Config, size int) *connectionManager {
 	if size <= 0 {
 		size = defaultConnPoolSize
 	}
 	return &connectionManager{
-		url:   url,
-		size:  size,
-		conns: make([]*amqp.Connection, size),
+		url:  url,
+		cfg:  cfg,
+		size: size,
+		pool: make([]*Connection, size),
 	}
+}
+
+// onOpen sets the callback for connection open events.
+// Handlers added later are chained after earlier ones.
+// An added handler cannot be removed.
+func (m *connectionManager) onOpen(handler ConnectionOpenHandler) {
+	m.handlersMu.Lock()
+	oldHandler := m.openHandler
+	m.openHandler = func(idx int) {
+		if oldHandler != nil {
+			oldHandler(idx)
+		}
+		handler(idx)
+	}
+	m.openHandler = handler
+	m.handlersMu.Unlock()
+}
+
+// onClose sets the callback for connection close events.
+// Handlers added later are chained after earlier ones.
+// An added handler cannot be removed.
+func (m *connectionManager) onClose(handler ConnectionCloseHandler) {
+	m.handlersMu.Lock()
+	oldHandler := m.closeHandler
+	m.closeHandler = func(idx int, code int, reason string, server bool, recover bool) {
+		if oldHandler != nil {
+			oldHandler(idx, code, reason, server, recover)
+		}
+		handler(idx, code, reason, server, recover)
+	}
+	m.handlersMu.Unlock()
+}
+
+// onBlock sets the callback for connection blocked/unblocked events.
+// Handlers added later are chained after earlier ones.
+// An added handler cannot be removed.
+func (m *connectionManager) onBlock(handler ConnectionBlockHandler) {
+	m.handlersMu.Lock()
+	oldHandler := m.blockHandler
+	m.blockHandler = func(idx int, active bool, reason string) {
+		if oldHandler != nil {
+			oldHandler(idx, active, reason)
+		}
+		handler(idx, active, reason)
+	}
+	m.handlersMu.Unlock()
 }
 
 // init creates all managed connections.
@@ -56,17 +134,23 @@ func (m *connectionManager) init(ctx context.Context) error {
 	m.ctx, m.cancel = context.WithCancel(ctx)
 
 	for i := 0; i < m.size; i++ {
-		conn, err := newConnection(m.url)
+		conn, err := newConnection(m.url, m.cfg)
 		if err != nil {
 			// Close any connections we've already opened
 			for j := 0; j < i; j++ {
-				if m.conns[j] != nil {
-					_ = m.conns[j].Close()
+				if m.pool[j] != nil {
+					_ = m.pool[j].Close()
 				}
 			}
-			return fmt.Errorf("failed to initialize connection %d: %w", i+1, err)
+			return wrapEntityError("initialize", fmt.Sprintf("connection %d", i+1), err)
 		}
-		m.conns[i] = conn
+		m.pool[i] = conn // Call open handler if registered
+		m.handlersMu.RLock()
+		openHandler := m.openHandler
+		m.handlersMu.RUnlock()
+		if openHandler != nil {
+			go openHandler(i)
+		}
 
 		// Start monitoring this connection
 		go m.monitor(conn)
@@ -82,9 +166,9 @@ func (m *connectionManager) init(ctx context.Context) error {
 //   - size 2: Control and Publishers use connection 0, Consumers use connection 1.
 //   - size 3: Control uses connection 0, Publishers use connection 1, Consumers use connection 2.
 //   - size 4+: Control uses connection 0, Publishers and Consumers are distributed across connections 1+ using round-robin.
-func (m *connectionManager) assign(_ context.Context, role endpointRole) (*amqp.Connection, error) {
+func (m *connectionManager) assign(_ context.Context, role endpointRole) (*Connection, error) {
 	if m.closed.Load() {
-		return nil, fmt.Errorf("connection manager closed")
+		return nil, ErrConnectionManagerClosed
 	}
 
 	m.connMu.RLock()
@@ -128,13 +212,18 @@ func (m *connectionManager) assign(_ context.Context, role endpointRole) (*amqp.
 		}
 	}
 
-	if idx >= len(m.conns) {
-		return nil, fmt.Errorf("connection index out of range")
+	if idx >= len(m.pool) {
+		return nil, ErrConnectionIndexRange
 	}
 
-	conn := m.conns[idx]
+	conn := m.pool[idx]
 	if conn == nil {
-		return nil, fmt.Errorf("connection not initialized")
+		return nil, ErrConnectionNotInitialized
+	}
+
+	// Check if connection is closed
+	if conn.IsClosed() {
+		return nil, ErrConnectionClosed
 	}
 
 	return conn, nil
@@ -149,23 +238,31 @@ func (m *connectionManager) replace(idx int) error {
 	m.connMu.Lock()
 	defer m.connMu.Unlock()
 
-	if idx < 0 || idx >= len(m.conns) {
+	if idx < 0 || idx >= len(m.pool) {
 		return fmt.Errorf("invalid connection index: %d", idx)
 	}
 
 	// Close old connection if still open
-	if m.conns[idx] != nil {
-		_ = m.conns[idx].Close()
+	if m.pool[idx] != nil {
+		_ = m.pool[idx].Close()
 	}
 
 	// Create new connection
-	conn, err := newConnection(m.url)
+	conn, err := newConnection(m.url, m.cfg)
 	if err != nil {
-		m.conns[idx] = nil
+		m.pool[idx] = nil
 		return fmt.Errorf("replace connection %d: %w", idx, err)
 	}
 
-	m.conns[idx] = conn
+	m.pool[idx] = conn
+
+	// Call open handler if registered
+	m.handlersMu.RLock()
+	openHandler := m.openHandler
+	m.handlersMu.RUnlock()
+	if openHandler != nil {
+		go openHandler(idx)
+	}
 
 	// Start monitoring the new connection
 	go m.monitor(conn)
@@ -174,7 +271,7 @@ func (m *connectionManager) replace(idx int) error {
 }
 
 // monitor watches a connection for close and block events, replacing it when necessary.
-func (m *connectionManager) monitor(conn *amqp.Connection) {
+func (m *connectionManager) monitor(conn *Connection) {
 	closeCh := make(chan *amqp.Error, 1)
 	blockCh := make(chan amqp.Blocking, 1)
 
@@ -189,10 +286,23 @@ func (m *connectionManager) monitor(conn *amqp.Connection) {
 			if !ok {
 				return
 			}
+
+			idx := m.index(conn)
+
+			// Call close handler if registered
+			if err != nil {
+				m.handlersMu.RLock()
+				handler := m.closeHandler
+				m.handlersMu.RUnlock()
+
+				if handler != nil {
+					// Call handler in goroutine to prevent blocking
+					go handler(idx, err.Code, err.Reason, err.Server, err.Recover)
+				}
+			}
+
 			// Connection closed, attempt to replace it if manager is still open
 			if err != nil && !m.closed.Load() {
-				// Connection closed with error
-				idx := m.index(conn)
 				_ = m.replace(idx)
 			}
 			return
@@ -200,18 +310,22 @@ func (m *connectionManager) monitor(conn *amqp.Connection) {
 			if !ok {
 				return
 			}
-			if block.Active {
-				// Connection blocked - for now just log/monitor
-				// In the future, could implement more aggressive replacement
-				_ = block
+
+			// Call block handler if registered
+			m.handlersMu.RLock()
+			handler := m.blockHandler
+			m.handlersMu.RUnlock()
+
+			if handler != nil {
+				// Call handler in goroutine to prevent blocking
+				go handler(m.index(conn), block.Active, block.Reason)
 			}
-			// Connection unblocked, continue monitoring
 		}
 	}
 }
 
 // index returns the index of a connection in the pool, or -1 if not found.
-func (m *connectionManager) index(conn *amqp.Connection) int {
+func (m *connectionManager) index(conn *Connection) int {
 	if conn == nil {
 		return -1
 	}
@@ -219,7 +333,7 @@ func (m *connectionManager) index(conn *amqp.Connection) int {
 	m.connMu.RLock()
 	defer m.connMu.RUnlock()
 
-	for i, c := range m.conns {
+	for i, c := range m.pool {
 		if c == conn {
 			return i
 		}
@@ -239,10 +353,10 @@ func (m *connectionManager) close() {
 	m.connMu.Lock()
 	defer m.connMu.Unlock()
 
-	for i, conn := range m.conns {
+	for i, conn := range m.pool {
 		if conn != nil {
 			_ = conn.Close()
-			m.conns[i] = nil
+			m.pool[i] = nil
 		}
 	}
 }
