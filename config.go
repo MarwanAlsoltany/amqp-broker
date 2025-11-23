@@ -6,33 +6,30 @@ import (
 	"time"
 )
 
-func generateBrokerID() string {
+var defaultBrokerID string
+
+func init() {
 	hostname, err := os.Hostname()
 	if err != nil {
 		hostname = "unknown"
 	}
 	pid := os.Getpid()
-	return fmt.Sprintf("%s-%d", hostname, pid)
+
+	defaultBrokerID = fmt.Sprintf("%s-%d", hostname, pid)
 }
 
 const (
 	// Default AMQP Broker URL
 	defaultBrokerURL = "amqp://guest:guest@localhost:5672/"
 
-	// Default exchange kind
-	defaultExchangeType = "direct"
-
 	// Default connection pool size
-	defaultConnPoolSize = 4
-
-	// Default channel pool size
-	defaultChPoolSize = 8
+	// Size 2: One for publishers/control, one for consumers (recommended)
+	defaultConnPoolSize = 1
 
 	// Default reconnection backoff
 	defaultReconnectMin = 500 * time.Millisecond
 	defaultReconnectMax = 30 * time.Second
-
-	// Default reconnection delay for publishers/consumers
+	// Default reconnection delay between attempts
 	defaultReconnectDelay = 1 * time.Second
 
 	// Default ready timeout
@@ -40,6 +37,9 @@ const (
 
 	// Default confirmation timeout
 	defaultConfirmTimeout = 5 * time.Second
+
+	// Default exchange kind
+	defaultExchangeType = "direct"
 
 	// Default prefetch count for consumers
 	defaultPrefetchCount = 1
@@ -74,28 +74,13 @@ func defaultQueue(name string) Queue {
 	}
 }
 
-func defaultBinding(exchange, queue string) Binding {
-	return Binding{
-		Source:      exchange,
-		Destination: queue,
-		Pattern:     "",
-		Args:        nil,
-	}
-}
-
 // defaultPublishOptions returns PublishOptions with defaults applied.
-func defaultPublishOptions() PublishOptions {
-	return PublishOptions{
-		Mandatory:      false,
-		Immediate:      false,
-		WaitForConfirm: false,
-		ConfirmTimeout: defaultConfirmTimeout,
-	}
-}
-
 func defaultPublisherOptions() PublisherOptions {
 	return PublisherOptions{
 		ConfirmMode:     false,
+		ConfirmTimeout:  defaultConfirmTimeout,
+		Mandatory:       false,
+		Immediate:       false,
 		NoWaitForReady:  false,
 		ReadyTimeout:    defaultReadyTimeout,
 		NoAutoReconnect: false,
@@ -108,6 +93,8 @@ func defaultConsumerOptions() ConsumerOptions {
 	return ConsumerOptions{
 		AutoAck:         false,
 		PrefetchCount:   defaultPrefetchCount,
+		NoWait:          false,
+		Exclusive:       false,
 		NoWaitForReady:  false,
 		ReadyTimeout:    defaultReadyTimeout,
 		NoAutoReconnect: false,

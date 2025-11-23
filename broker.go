@@ -15,54 +15,37 @@ var (
 	ErrBrokerClosed = errors.New("broker is closed")
 )
 
-// Endpoint represents a publisher or consumer with access to its connection and channel.
-type Endpoint interface {
-	// Connection returns the current connection (may be nil if not connected).
-	Connection() *amqp.Connection
-	// Channel returns the current channel (may be nil if not connected).
-	Channel() *amqp.Channel
-	// Close stops the endpoint and releases resources.
-	Close() error
-	// Unregister removes the endpoint from the broker's registry and closes it.
-	Unregister()
-}
-
 // Broker manages AMQP connections, publishers, and consumers with automatic
-// reconnection, connection pooling, and topology management.
+// reconnection, connection management, and topology management.
 type Broker struct {
 	id  string
 	url string
 
-	// Control connection for topology management
-	conn   *amqp.Connection
-	connMu sync.RWMutex
+	// Base context for managing lifecycle
+	ctx    context.Context
+	cancel context.CancelFunc
 
-	// Connection pool for publishers and consumers
-	connPool     *connectionPool
+	// Closed state
+	closed atomic.Bool
+
+	// Connection manager for all connections
+	connMgr      *connectionManager
 	connPoolSize int
-
-	// Channel pool for fast one-off operations
-	chPool     *channelPool
-	chPoolSize int
 
 	// Topology and declaration caching
 	topology   *Topology
 	topologyMu sync.RWMutex
 
+	// Cache of declared exchanges, queues, and bindings
 	declarations sync.Map // map[string]struct{}
 
 	// Publisher registry for managed publishers
-	publishers   map[string]*publisher
+	publishers   map[string]Publisher
 	publishersMu sync.Mutex
 
 	// Consumer registry for managed consumers
-	consumers   map[string]*consumer
+	consumers   map[string]Consumer
 	consumersMu sync.Mutex
-
-	closed atomic.Bool
-
-	ctx    context.Context
-	cancel context.CancelFunc
 
 	// Reconnection configuration
 	reconnectMin time.Duration
@@ -89,25 +72,17 @@ func WithIdentifier(id string) BrokerOption {
 	}
 }
 
-// WithConnectionPoolSize sets the maximum number of pooled connections.
-// Defaults to defaultConnPoolSize.
+// WithConnectionPoolSize sets the number of managed connections.
+// - Size 1: All operations share one connection
+// - Size 2: Publishers/Control use one, Consumers use another (recommended default)
+// - Size 3+: Dedicated connections for publishers, consumers, and control
+// Defaults to defaultConnPoolSize (2).
 func WithConnectionPoolSize(n int) BrokerOption {
 	return func(b *Broker) {
 		if n <= 0 {
 			n = defaultConnPoolSize
 		}
 		b.connPoolSize = n
-	}
-}
-
-// WithChannelPoolSize sets the maximum number of pooled channels.
-// Defaults to defaultChanPoolSize.
-func WithChannelPoolSize(n int) BrokerOption {
-	return func(b *Broker) {
-		if n <= 0 {
-			n = defaultChPoolSize
-		}
-		b.chPoolSize = n
 	}
 }
 
@@ -137,14 +112,13 @@ func WithContext(ctx context.Context) BrokerOption {
 func NewBroker(opts ...BrokerOption) (*Broker, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	b := &Broker{
-		id:           generateBrokerID(),
+		id:           defaultBrokerID,
 		url:          defaultBrokerURL,
 		ctx:          ctx,
 		cancel:       cancel,
 		connPoolSize: defaultConnPoolSize,
-		chPoolSize:   defaultChPoolSize,
-		publishers:   make(map[string]*publisher),
-		consumers:    make(map[string]*consumer),
+		publishers:   make(map[string]Publisher),
+		consumers:    make(map[string]Consumer),
 		reconnectMin: defaultReconnectMin,
 		reconnectMax: defaultReconnectMax,
 	}
@@ -153,162 +127,48 @@ func NewBroker(opts ...BrokerOption) (*Broker, error) {
 		opt(b)
 	}
 
-	if err := b.validateConfig(); err != nil {
+	if b.reconnectMin <= 0 {
+		return nil, fmt.Errorf("invalid reconnect config: min must be positive")
+	}
+	if b.reconnectMax <= b.reconnectMin {
+		return nil, fmt.Errorf("invalid reconnect config: max must be greater than min")
+	}
+
+	b.connMgr = newConnectionManager(b.url, b.connPoolSize)
+
+	// Initialize all managed connections
+	if err := b.connMgr.init(ctx); err != nil {
 		return nil, err
 	}
-
-	b.connPool = newConnectionPool(b.url, b.connPoolSize)
-	b.chPool = newChannelPool(b.connPool, b.chPoolSize)
-
-	// Establish initial control connection
-	if err := b.connect(ctx); err != nil {
-		return nil, fmt.Errorf("initial connect failed: %w", err)
-	}
-
-	// maintain and monitor the control connection and reconnects on failure.
-	go func() {
-		for {
-			conn := b.Connection()
-			if conn == nil {
-				if err := b.connectWithRetry(ctx); err != nil {
-					if errors.Is(err, context.Canceled) {
-						return
-					}
-					time.Sleep(b.reconnectMin)
-					continue
-				}
-				conn = b.Connection()
-			}
-
-			notify := conn.NotifyClose(make(chan *amqp.Error, 1))
-			select {
-			case <-b.ctx.Done():
-				_ = conn.Close()
-				return
-			case err := <-notify:
-				_ = err // suppress unused variable warning
-				_ = conn.Close()
-				b.setConnection(nil)
-				// log.Printf("control connection closed: %v", err)
-				// Continue to reconnect
-			}
-		}
-	}()
 
 	return b, nil
 }
 
-func (b *Broker) validateConfig() error {
-	if b.connPoolSize <= 0 {
-		return fmt.Errorf("invalid connection pool size: must be at least 1")
-	}
-	if b.chPoolSize <= 0 {
-		return fmt.Errorf("invalid channel pool size: must be at least 1")
-	}
-	if b.reconnectMin <= 0 {
-		return fmt.Errorf("invalid reconnect config: min must be positive")
-	}
-	if b.reconnectMax <= b.reconnectMin {
-		return fmt.Errorf("invalid reconnect config: max must be greater than min")
-	}
-
-	return nil
-}
-
-// connect attempts a single connection attempt and applies topology.
-func (b *Broker) connect(_ context.Context) error {
-	// control connection, should not be pooled
-	conn, err := newConnection(b.url)
+// Connection returns the control connection for topology operations.
+func (b *Broker) Connection() (*amqp.Connection, error) {
+	conn, err := b.connMgr.assign(b.ctx, roleControl)
 	if err != nil {
-		return fmt.Errorf("dial control connection: %w", err)
-	}
-	b.setConnection(conn)
-
-	// Apply topology if configured
-	b.topologyMu.RLock()
-	t := b.topology
-	b.topologyMu.RUnlock()
-
-	if t != nil {
-		if err := b.applyTopology(conn, t); err != nil {
-			_ = conn.Close()
-			b.setConnection(nil)
-			return fmt.Errorf("apply topology: %w", err)
-		}
+		return nil, fmt.Errorf("assign control connection: %w", err)
 	}
 
-	// Notify all managed endpoints to reconnect
-	b.notifyReconnect()
-
-	return nil
+	return conn, nil
 }
 
-// connectWithRetry attempts connection with exponential backoff.
-func (b *Broker) connectWithRetry(ctx context.Context) error {
-	backoff := b.reconnectMin
-	for {
-		if b.closed.Load() {
-			return ErrBrokerClosed
-		}
-		if err := b.connect(ctx); err == nil {
-			return nil
-		}
-		select {
-		case <-time.After(backoff):
-			backoff *= 2
-			if backoff > b.reconnectMax {
-				backoff = b.reconnectMax
-			}
-			continue
-		case <-ctx.Done():
-			return ctx.Err()
-		}
+// Channel returns the control channel for topology operations.
+//
+// NOTE: A Channel returned by this method should be closed by the caller.
+func (b *Broker) Channel() (*amqp.Channel, error) {
+	conn, err := b.Connection()
+	if err != nil {
+		return nil, err
 	}
-}
 
-// notifyReconnect signals all managed publishers and consumers to reconnect.
-func (b *Broker) notifyReconnect() {
-	// Notify publishers
-	b.publishersMu.Lock()
-	for _, pe := range b.publishers {
-		pe.reconnect()
-	}
-	b.publishersMu.Unlock()
-
-	// Notify consumers
-	b.consumersMu.Lock()
-	for _, ce := range b.consumers {
-		ce.reconnect()
-	}
-	b.consumersMu.Unlock()
-}
-
-// Connection returns the current control connection (may be nil).
-func (b *Broker) Connection() *amqp.Connection {
-	b.connMu.RLock()
-	defer b.connMu.RUnlock()
-	return b.conn
-}
-
-// setConnection updates the control connection.
-func (b *Broker) setConnection(c *amqp.Connection) {
-	b.connMu.Lock()
-	defer b.connMu.Unlock()
-	b.conn = c
-}
-
-// NewChannel opens a new channel on the control connection.
-// Returns the channel and a cleanup function.
-func (b *Broker) NewChannel() (*amqp.Channel, func(), error) {
-	conn := b.Connection()
-	if conn == nil {
-		return nil, nil, errors.New("control connection is not established")
-	}
 	ch, err := conn.Channel()
 	if err != nil {
-		return nil, nil, fmt.Errorf("open control channel: %w", err)
+		return nil, fmt.Errorf("create control channel: %w", err)
 	}
-	return ch, func() { _ = ch.Close() }, nil
+
+	return ch, nil
 }
 
 // Close shuts down the broker and all managed endpoints.
@@ -334,67 +194,44 @@ func (b *Broker) Close() error {
 	}
 	b.consumersMu.Unlock()
 
-	// Close pools
-	if b.chPool != nil {
-		b.chPool.close()
-	}
-	if b.connPool != nil {
-		b.connPool.close()
-	}
-
-	// Close control connection
-	conn := b.Connection()
-	if conn != nil {
-		return conn.Close()
+	// Close connection manager
+	if b.connMgr != nil {
+		b.connMgr.close()
 	}
 
 	return nil
 }
 
-// DeclareTopology declares exchanges, queues, and bindings on the control connection.
+// Declare applies the given topology to the broker (exchanges, queues, and bindings).
 // The topology is cached and will be reapplied on reconnection.
-func (b *Broker) DeclareTopology(t Topology) error {
+func (b *Broker) Declare(t *Topology) error {
 	b.topologyMu.Lock()
-	b.topology = &t
+	b.topology = t
 	b.topologyMu.Unlock()
 
-	conn := b.Connection()
-	if conn == nil {
-		return errors.New("control connection is not established")
-	}
-
-	return b.applyTopology(conn, &t)
-}
-
-// applyTopology applies topology declarations to the given connection.
-func (b *Broker) applyTopology(conn *amqp.Connection, t *Topology) error {
-	// This channel is used only as a fallback, ensure*Declared functions create their own channels.
-	// The reason for that is, channels in AMQP are not thread-safe and are intended to be used
-	// by a single goroutine at a time. By creating a new channel for each declaration,
-	// the code avoids race conditions and potential channel state corruption.
-	ch, err := conn.Channel()
+	ch, err := b.Channel()
 	if err != nil {
-		return fmt.Errorf("topology: open channel: %w", err)
+		return fmt.Errorf("control channel is not established: %w", err)
 	}
 	defer ch.Close()
 
-	// Declare all exchanges (strict mode)
+	// Declare all exchanges
 	for _, e := range t.Exchanges {
-		if err := b.ensureExchangeDeclared(ch, e, true); err != nil {
+		if err := b.declareExchange(ch, e); err != nil {
 			return err
 		}
 	}
 
-	// Declare all queues (strict mode)
+	// Declare all queues
 	for _, q := range t.Queues {
-		if err := b.ensureQueueDeclared(ch, q, true); err != nil {
+		if err := b.declareQueue(ch, q); err != nil {
 			return err
 		}
 	}
 
-	// Declare all bindings (strict mode)
+	// Declare all bindings
 	for _, bn := range t.Bindings {
-		if err := b.ensureBindingDeclared(ch, bn, true); err != nil {
+		if err := b.declareBinding(ch, bn); err != nil {
 			return err
 		}
 	}
@@ -402,8 +239,9 @@ func (b *Broker) applyTopology(conn *amqp.Connection, t *Topology) error {
 	return nil
 }
 
-// ensureExchangeDeclared declares an exchange if not already cached.
-func (b *Broker) ensureExchangeDeclared(ch *amqp.Channel, e Exchange, strict bool) error {
+// declareExchange declares an exchange if not already cached.
+// The channel parameter should be the control channel or an endpoint's channel.
+func (b *Broker) declareExchange(ch *amqp.Channel, e Exchange) error {
 	if e.Name == "" {
 		return fmt.Errorf("exchange name cannot be empty")
 	}
@@ -417,21 +255,15 @@ func (b *Broker) ensureExchangeDeclared(ch *amqp.Channel, e Exchange, strict boo
 		kind = defaultExchangeType
 	}
 
-	var err error
-	// Try control connection first
-	if conn := b.Connection(); conn != nil {
-		if ctrlCh, cleanup, ctrlErr := b.NewChannel(); ctrlErr == nil {
-			err = ctrlCh.ExchangeDeclare(e.Name, kind, e.Durable, e.AutoDelete, e.Internal, e.NoWait, e.Args)
-			cleanup()
-			if err == nil || !strict {
-				return err
-			}
-		}
-	}
-
-	// Fallback to provided channel
-	err = ch.ExchangeDeclare(e.Name, kind, e.Durable, e.AutoDelete, e.Internal, e.NoWait, e.Args)
-	if strict && err != nil {
+	err := ch.ExchangeDeclare(
+		e.Name, kind,
+		e.Durable,
+		e.AutoDelete,
+		e.Internal,
+		e.NoWait,
+		e.Args,
+	)
+	if err != nil {
 		b.declarations.Delete(hash(e)) // Remove from cache if failed
 		return fmt.Errorf("failed to declare exchange %s: %w", e.Name, err)
 	}
@@ -439,8 +271,9 @@ func (b *Broker) ensureExchangeDeclared(ch *amqp.Channel, e Exchange, strict boo
 	return nil
 }
 
-// ensureQueueDeclared declares a queue if not already cached.
-func (b *Broker) ensureQueueDeclared(ch *amqp.Channel, q Queue, strict bool) error {
+// declareQueue declares a queue if not already cached.
+// The channel parameter should be the control channel or an endpoint's channel.
+func (b *Broker) declareQueue(ch *amqp.Channel, q Queue) error {
 	if q.Name == "" {
 		return fmt.Errorf("queue name cannot be empty")
 	}
@@ -449,21 +282,15 @@ func (b *Broker) ensureQueueDeclared(ch *amqp.Channel, q Queue, strict bool) err
 		return nil
 	}
 
-	var err error
-	// Try control connection first
-	if conn := b.Connection(); conn != nil {
-		if ctrlCh, cleanup, e := b.NewChannel(); e == nil {
-			_, err = ctrlCh.QueueDeclare(q.Name, q.Durable, q.AutoDelete, q.Exclusive, q.NoWait, q.Args)
-			cleanup()
-			if err == nil || !strict {
-				return err
-			}
-		}
-	}
-
-	// Fallback to provided channel
-	_, err = ch.QueueDeclare(q.Name, q.Durable, q.AutoDelete, q.Exclusive, q.NoWait, q.Args)
-	if strict && err != nil {
+	_, err := ch.QueueDeclare(
+		q.Name,
+		q.Durable,
+		q.AutoDelete,
+		q.Exclusive,
+		q.NoWait,
+		q.Args,
+	)
+	if err != nil {
 		b.declarations.Delete(hash(q)) // Remove from cache if failed
 		return fmt.Errorf("failed to declare queue %s: %w", q.Name, err)
 	}
@@ -471,8 +298,9 @@ func (b *Broker) ensureQueueDeclared(ch *amqp.Channel, q Queue, strict bool) err
 	return nil
 }
 
-// ensureBindingDeclared declares a binding if not already cached.
-func (b *Broker) ensureBindingDeclared(ch *amqp.Channel, bn Binding, strict bool) error {
+// declareBinding declares a binding if not already cached.
+// The channel parameter should be the control channel or an endpoint's channel.
+func (b *Broker) declareBinding(ch *amqp.Channel, bn Binding) error {
 	if bn.Source == "" || bn.Destination == "" {
 		return fmt.Errorf("binding source and destination cannot be empty")
 	}
@@ -482,28 +310,24 @@ func (b *Broker) ensureBindingDeclared(ch *amqp.Channel, bn Binding, strict bool
 	}
 
 	var err error
-	// Try control connection first
-	if conn := b.Connection(); conn != nil {
-		if ctrlCh, cleanup, e := b.NewChannel(); e == nil {
-			if bn.Type == BindingTypeExchange {
-				err = ctrlCh.ExchangeBind(bn.Destination, bn.Pattern, bn.Source, false, bn.Args)
-			} else {
-				err = ctrlCh.QueueBind(bn.Destination, bn.Pattern, bn.Source, false, bn.Args)
-			}
-			cleanup()
-			if err == nil || !strict {
-				return err
-			}
-		}
-	}
-
-	// Fallback to provided channel
 	if bn.Type == BindingTypeExchange {
-		err = ch.ExchangeBind(bn.Destination, bn.Pattern, bn.Source, false, bn.Args)
+		err = ch.ExchangeBind(
+			bn.Destination,
+			bn.Pattern,
+			bn.Source,
+			false, /* no-wait */
+			bn.Args,
+		)
 	} else {
-		err = ch.QueueBind(bn.Destination, bn.Pattern, bn.Source, false, bn.Args)
+		err = ch.QueueBind(
+			bn.Destination,
+			bn.Pattern,
+			bn.Source,
+			false, /* no-wait */
+			bn.Args,
+		)
 	}
-	if strict && err != nil {
+	if err != nil {
 		b.declarations.Delete(hash(bn)) // Remove from cache if failed
 		return fmt.Errorf("failed to declare %q binding %s -> %s: %w", bn.Type, bn.Source, bn.Destination, err)
 	}
@@ -671,7 +495,7 @@ func (b *Broker) Publish(ctx context.Context, exchange, routingKey string, msg .
 	}
 	defer p.Close()
 
-	return p.Publish(ctx, rk, msg, nil)
+	return p.Publish(ctx, rk, msg...)
 }
 
 // Consume is a convenience method that creates and starts a consumer.
