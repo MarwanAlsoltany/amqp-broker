@@ -2,9 +2,9 @@ package broker
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	amqp "github.com/rabbitmq/amqp091-go"
@@ -15,8 +15,26 @@ import (
 // reconnection and graceful shutdown.
 type Consumer interface {
 	Endpoint
-	// Consume blocks until all in-flight message handlers complete.
-	Consume()
+	// Consume blocks and processes messages until the context is cancelled or an error occurs.
+	// It automatically handles reconnection and continues consuming until explicitly stopped.
+	// Returns an error if the consumer fails to start or encounters a fatal error.
+	// Use Wait() to block until all in-flight message handlers complete.
+	Consume(ctx context.Context) error
+	// Wait blocks until all in-flight message handlers complete.
+	// Returns immediately if no messages are being processed.
+	// This does not stop the consumer; messages will continue to be accepted in the background.
+	Wait()
+	// Get synchronously fetches one message from the queue (polling).
+	// Returns nil if queue is empty. For continuous delivery, use Consume().
+	Get(autoAck bool) (*Message, error)
+	// Pause pauses message deliveries from the server.
+	// Call Resume() to restart deliveries.
+	Pause() error
+	// Resume resumes message deliveries from the server.
+	Resume() error
+	// Cancel stops consuming messages without closing the channel.
+	// Call Consume() again to restart consumption.
+	Cancel() error
 }
 
 // AckAction specifies how a message should be acknowledged.
@@ -27,11 +45,11 @@ func (a AckAction) String() string {
 	case AckActionAck:
 		return "ack"
 	case AckActionNackRequeue:
-		return "nack_requeue"
+		return "nack.requeue"
 	case AckActionNackDiscard:
-		return "nack_discard"
+		return "nack.discard"
 	case AckActionNoAction:
-		return "no_action"
+		return ""
 	default:
 		return "unknown"
 	}
@@ -82,6 +100,12 @@ type ConsumerOptions struct {
 	// Only used if NoWaitForReady is false.
 	// Default: defaultReadyTimeout
 	ReadyTimeout time.Duration
+	// MaxConcurrentHandlers limits the number of messages processed concurrently.
+	// <= 0: unlimited goroutines, one per message (default, PrefetchCount provides backpressure)
+	// 1: sequential processing, messages handled one at a time
+	// N: worker pool with N concurrent handlers
+	// Default: 0 (unlimited)
+	MaxConcurrentHandlers int
 	// OnCancel is called when the server cancels the consumer (queue deleted, failover, etc).
 	// The string parameter is the consumer tag.
 	// If nil, cancellations trigger automatic reconnection.
@@ -102,6 +126,8 @@ type consumer struct {
 	cancelCh <-chan string
 	// track handlers
 	wg sync.WaitGroup
+	// track consumption state
+	consuming atomic.Bool
 }
 
 var _ Consumer = (*consumer)(nil)
@@ -116,13 +142,146 @@ func newConsumer(b *Broker, id string, opts ConsumerOptions, q Queue, h Handler)
 	return c
 }
 
-// Consume blocks until all in-flight message handlers complete.
-func (c *consumer) Consume() {
+// Consume blocks until the provided context is cancelled, then disconnects the consumer
+// and waits for all in-flight message handlers to complete.
+// The consumer runs in the background (started by NewConsumer), and this method provides
+// lifecycle control by blocking until the context is cancelled.
+//
+// When the context is cancelled:
+//   - The consumer stops accepting new messages
+//   - The connection is disconnected
+//   - All in-flight handlers are allowed to complete
+//
+// Common usage patterns:
+//   - Block in main: consumer.Consume(ctx) until signal
+//   - Graceful shutdown: cancel context, Consume() returns after handlers finish
+//
+// Example:
+//
+//	ctx, cancel := context.WithCancel(context.Background())
+//	defer cancel()
+//
+//	go func() {
+//	    <-sigCh
+//	    cancel()  // Trigger shutdown
+//	}()
+//
+//	if err := consumer.Consume(ctx); err != nil {
+//	    log.Printf("consumer stopped: %v", err)
+//	}
+//
+// After Consume() returns, the consumer is stopped and cannot be reused.
+// To consume again, create a new Consumer instance.
+func (c *consumer) Consume(ctx context.Context) error {
+	// Block until context cancelled
+	<-ctx.Done()
+
+	// Disconnect consumer
+	c.disconnect()
+	// Wait for all in-flight handlers to complete
+	c.Wait()
+	// // Restart if WaitForReady is set
+	// if !c.opts.NoWaitForReady {
+	// 	go c.run()
+	// 	// Wait for ready
+	// 	readyCtx, cancel := context.WithTimeout(c.broker.ctx, c.opts.ReadyTimeout)
+	// 	defer cancel()
+	// 	if !c.waitReady(readyCtx) {
+	// 		return ErrNotReadyTimeout
+	// 	}
+	// }
+
+	return ctx.Err()
+}
+
+// Wait blocks until all in-flight message handlers complete.
+// It returns when the WaitGroup counter reaches zero, meaning no messages are currently
+// being processed. The consumer continues running and accepting new messages in the background.
+//
+// Common usage patterns:
+//   - Graceful drain: Cancel() -> Wait() -> Close()
+//   - Batch processing: send batch -> Wait() to wait for completion
+//   - Synchronization: Wait() blocks while messages are actively being processed
+//
+// Note: Wait() may return between messages if no handlers are running.
+// To stop the consumer entirely, cancel the context passed to Consume().
+func (c *consumer) Wait() {
 	c.wg.Wait()
 }
 
-// Unregister removes the consumer from the broker's registry and stops it.
-func (c *consumer) Unregister() {
+// Get synchronously fetches one message from the queue (polling).
+// Returns nil if queue is empty. For continuous delivery, use Consume().
+func (c *consumer) Get(autoAck bool) (*Message, error) {
+	ch := c.Channel()
+	if ch == nil || ch.IsClosed() {
+		return nil, ErrChannelNotAvailable
+	}
+
+	delivery, ok, err := ch.Get(c.queue.Name, autoAck)
+	if err != nil {
+		return nil, wrapError("get message", err)
+	}
+
+	if !ok {
+		return nil, nil // Queue is empty
+	}
+
+	msg := amqpDeliveryToMessage(&delivery)
+	msg.broker = c.broker
+	return &msg, nil
+}
+
+// Cancel stops consuming messages without closing the channel.
+// Call Consume() again to restart consumption.
+func (c *consumer) Cancel() error {
+	if !c.consuming.Swap(false) {
+		return nil // Already cancelled
+	}
+
+	ch := c.Channel()
+	if ch == nil || ch.IsClosed() {
+		return ErrChannelNotAvailable
+	}
+
+	// Use consumer.id as the consumer tag
+	if err := ch.Cancel(c.id, false); err != nil {
+		return wrapError("cancel consumer", err)
+	}
+
+	return nil
+}
+
+// Pause pauses message deliveries from the server.
+// Call Resume() to restart deliveries.
+func (c *consumer) Pause() error {
+	ch := c.Channel()
+	if ch == nil || ch.IsClosed() {
+		return ErrChannelNotAvailable
+	}
+
+	if err := ch.Flow(false); err != nil {
+		return wrapError("pause flow", err)
+	}
+
+	return nil
+}
+
+// Resume resumes message deliveries from the server.
+func (c *consumer) Resume() error {
+	ch := c.Channel()
+	if ch == nil || ch.IsClosed() {
+		return ErrChannelNotAvailable
+	}
+
+	if err := ch.Flow(true); err != nil {
+		return wrapError("resume flow", err)
+	}
+
+	return nil
+}
+
+// Release removes the consumer from the broker's registry and stops it.
+func (c *consumer) Release() {
 	if c.broker == nil {
 		return
 	}
@@ -140,15 +299,15 @@ func (c *consumer) run() {
 		c.disconnect()
 	}()
 
-	autoConnect := !c.opts.NoAutoReconnect
+	autoReconnect := !c.opts.NoAutoReconnect
 	reconnectDelay := c.opts.ReconnectDelay
 	if reconnectDelay <= 0 {
 		reconnectDelay = defaultReconnectDelay
 	}
 
-	c.makeReady(
+	_ = c.makeReady(
 		ctx,
-		autoConnect,
+		autoReconnect,
 		reconnectDelay,
 		c.connect,
 		c.monitor,
@@ -159,18 +318,18 @@ func (c *consumer) run() {
 func (c *consumer) connect(ctx context.Context) error {
 	conn, err := c.broker.connMgr.assign(ctx, c.role)
 	if err != nil {
-		return fmt.Errorf("assign connection: %w", err)
+		return wrapError("assign connection", err)
 	}
 
 	ch, err := conn.Channel()
 	if err != nil {
-		return fmt.Errorf("open channel: %w", err)
+		return wrapError("open channel", err)
 	}
 
 	// Declare queue
 	err = c.endpoint.broker.declareQueue(ch, c.queue)
 	if err != nil {
-		return fmt.Errorf("ensure queue declared: %w", err)
+		return wrapError("declare queue", err)
 	}
 
 	// Set QoS
@@ -180,7 +339,7 @@ func (c *consumer) connect(ctx context.Context) error {
 	}
 	if err := ch.Qos(prefetch, 0, false); err != nil {
 		_ = ch.Close()
-		return fmt.Errorf("qos: %w", err)
+		return wrapError("set qos", err)
 	}
 
 	// Start consuming
@@ -195,7 +354,7 @@ func (c *consumer) connect(ctx context.Context) error {
 	)
 	if err != nil {
 		_ = ch.Close()
-		return fmt.Errorf("consume start: %w", err)
+		return wrapError("start consuming", err)
 	}
 
 	// Set up cancel notification
@@ -206,6 +365,9 @@ func (c *consumer) connect(ctx context.Context) error {
 	c.ch = ch
 	c.cancelCh = cancelCh
 	c.stateMu.Unlock()
+
+	// Mark as consuming
+	c.consuming.Store(true)
 
 	// Start delivery handler
 	go c.handleDeliveries(ctx, deliveries)
@@ -231,7 +393,7 @@ func (c *consumer) disconnect() {
 func (c *consumer) monitor(ctx context.Context) error {
 	ch := c.Channel()
 	if ch == nil {
-		return errors.New("channel not available")
+		return ErrChannelNotAvailable
 	}
 
 	closeCh := ch.NotifyClose(make(chan *amqp.Error, 1))
@@ -244,11 +406,12 @@ func (c *consumer) monitor(ctx context.Context) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	case err := <-closeCh:
-		if err != nil && c.opts.OnError != nil {
-			c.opts.OnError(fmt.Errorf("channel closed: %w", err))
+		amqpErr := newAMQPError("channel closed", err)
+		if amqpErr != nil && c.opts.OnError != nil {
+			c.opts.OnError(amqpErr)
 		}
 		c.disconnect()
-		return err
+		return amqpErr
 	case tag := <-cancelCh:
 		if c.opts.OnCancel != nil {
 			c.opts.OnCancel(tag)
@@ -260,6 +423,48 @@ func (c *consumer) monitor(ctx context.Context) error {
 
 // handleDeliveries processes incoming message deliveries.
 func (c *consumer) handleDeliveries(ctx context.Context, deliveries <-chan amqp.Delivery) {
+	var workers = c.opts.MaxConcurrentHandlers
+	var processor func(*Message)
+
+	switch {
+	case workers <= 0:
+		// spawns a goroutine for each message
+		processor = func(msg *Message) {
+			c.wg.Add(1)
+			go func() {
+				defer c.wg.Done()
+				c.processMessage(ctx, msg)
+			}()
+		}
+	case workers == 1:
+		// processes messages one at a time
+		processor = func(msg *Message) {
+			c.wg.Add(1)
+			defer c.wg.Done()
+			c.processMessage(ctx, msg)
+		}
+	default:
+		// uses a semaphore to limit concurrent handlers
+		semaphore := make(chan struct{}, workers)
+		processor = func(msg *Message) {
+			// acquire semaphore
+			select {
+			case <-ctx.Done():
+				return
+			case semaphore <- struct{}{}:
+			}
+
+			c.wg.Add(1)
+			go func() {
+				defer func() {
+					<-semaphore // release semaphore
+					c.wg.Done()
+				}()
+				c.processMessage(ctx, msg)
+			}()
+		}
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -269,40 +474,40 @@ func (c *consumer) handleDeliveries(ctx context.Context, deliveries <-chan amqp.
 				return
 			}
 
-			msg := deliveryToMessage(&d)
+			msg := amqpDeliveryToMessage(&d)
 			msg.broker = c.broker
-
-			c.wg.Add(1)
-			go func(msg *Message) {
-				defer c.wg.Done()
-				action, err := c.handler(ctx, msg)
-
-				// Notify user of handler error if callback provided
-				if err != nil && c.opts.OnError != nil {
-					c.opts.OnError(fmt.Errorf("handler error for message %s: %w", msg.MessageID, err))
-				}
-
-				if c.opts.AutoAck {
-					return
-				}
-
-				var ackErr error
-				switch action {
-				case AckActionAck:
-					ackErr = msg.amqpMetadata.Ack()
-				case AckActionNackRequeue:
-					ackErr = msg.amqpMetadata.Nack(true)
-				case AckActionNackDiscard:
-					ackErr = msg.amqpMetadata.Nack(false)
-				case AckActionNoAction:
-					// handler already handled ack/nack
-				}
-
-				// Notify user of ack/nack error if callback provided
-				if ackErr != nil && c.opts.OnError != nil {
-					c.opts.OnError(fmt.Errorf("%s failed for message %s: %w", action.String(), msg.MessageID, ackErr))
-				}
-			}(&msg)
+			processor(&msg)
 		}
+	}
+}
+
+// processMessage handles a single message with error handling and acknowledgment.
+func (c *consumer) processMessage(ctx context.Context, msg *Message) {
+	action, err := c.handler(ctx, msg)
+
+	// Notify user of handler error if callback provided
+	if err != nil && c.opts.OnError != nil {
+		c.opts.OnError(fmt.Errorf("handler failed for message %s: %w", msg.MessageID, err))
+	}
+
+	if c.opts.AutoAck {
+		return
+	}
+
+	var ackErr error
+	switch action {
+	case AckActionAck:
+		ackErr = msg.amqpMetadata.Ack()
+	case AckActionNackRequeue:
+		ackErr = msg.amqpMetadata.Nack(true)
+	case AckActionNackDiscard:
+		ackErr = msg.amqpMetadata.Nack(false)
+	case AckActionNoAction:
+		// handler already handled ack/nack
+	}
+
+	// Notify user of ack/nack error if callback provided
+	if ackErr != nil && c.opts.OnError != nil {
+		c.opts.OnError(fmt.Errorf("%s failed for message %s: %w", action.String(), msg.MessageID, ackErr))
 	}
 }
