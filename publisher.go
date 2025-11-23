@@ -2,7 +2,6 @@ package broker
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -24,6 +23,17 @@ type Publisher interface {
 type PublisherOptions struct {
 	// ConfirmMode enables publisher confirmations (recommended for reliable publishing).
 	ConfirmMode bool
+	// OnConfirm is called for each published message with its delivery tag and wait function.
+	// Parameters:
+	//   - deliveryTag: unique identifier for the message
+	//   - wait: function that blocks until confirmation arrives, returns true if acked
+	//           Accepts optional context to control timeout/cancellation
+	//           If no context provided (nil), waits indefinitely
+	// Only called when ConfirmMode is enabled.
+	// Providing this callback enables deferred confirmation mode.
+	// If nil, Publish waits for batch confirmations (default behavior).
+	// Example: wait(nil) or wait(ctx)
+	OnConfirm func(deliveryTag uint64, wait func(context.Context) bool)
 	// ConfirmTimeout is the maximum time to wait for confirmation.
 	// Only used if ConfirmMode is enabled.
 	// Default: defaultConfirmTimeout
@@ -32,6 +42,10 @@ type PublisherOptions struct {
 	// Returned messages are delivered via OnReturn callback.
 	// Default: false
 	Mandatory bool
+	// OnReturn is called when a mandatory or immediate publish is undeliverable.
+	// The Return contains the failed Publishing and error details.
+	// If nil, returned messages are silently discarded.
+	OnReturn func(Message)
 	// Immediate causes messages that cannot be immediately delivered to be returned.
 	// Note: RabbitMQ 3.0+ removed support for this flag.
 	// Default: false
@@ -49,10 +63,6 @@ type PublisherOptions struct {
 	// Only used if NoWaitForReady is false.
 	// Default: defaultReadyTimeout
 	ReadyTimeout time.Duration
-	// OnReturn is called when a mandatory or immediate publish is undeliverable.
-	// The Return contains the failed Publishing and error details.
-	// If nil, returned messages are silently discarded.
-	OnReturn func(Message)
 	// OnFlow is called when the server sends flow control notifications.
 	// active=true means publishing can resume, active=false means publishing is paused.
 	// If nil, flow control changes are handled internally without notification.
@@ -94,7 +104,7 @@ func newPublisher(b *Broker, id string, opts PublisherOptions, e Exchange) *publ
 // Publish sends a message to the specified exchange with the given routing key.
 func (p *publisher) Publish(ctx context.Context, rk RoutingKey, msgs ...Message) error {
 	if p.closed.Load() {
-		return errors.New("publisher closed")
+		return ErrPublisherClosed
 	}
 
 	if len(msgs) == 0 {
@@ -107,41 +117,73 @@ func (p *publisher) Publish(ctx context.Context, rk RoutingKey, msgs ...Message)
 
 	// Check flow control state
 	if !p.flow.Load() {
-		return errors.New("publisher flow paused by server")
+		return ErrPublisherFlowPaused
 	}
 
 	ch := p.endpoint.Channel()
 	if ch == nil {
-		return errors.New("publisher not connected")
+		return ErrPublisherNotConnected
 	}
 
 	err := p.endpoint.broker.declareExchange(ch, p.exchange)
 	if err != nil {
-		return fmt.Errorf("ensure exchange declared: %w", err)
-	} // Publish all messages
-	for i, msg := range msgs {
-		pub := publishingFromMessage(&msg)
+		return wrapError("declare exchange", err)
+	}
 
-		err := ch.PublishWithContext(
-			ctx,
-			p.exchange.Name,
-			string(rk),
-			p.opts.Mandatory,
-			p.opts.Immediate,
-			pub,
-		)
-		if err != nil {
-			return fmt.Errorf("publish message %d: %w", i, err)
+	// Publish all messages
+	for i, msg := range msgs {
+		pub := amqpPublishingFromMessage(&msg)
+
+		if p.opts.OnConfirm != nil && p.opts.ConfirmMode {
+			// Use deferred confirm mode - returns confirmation object
+			conf, err := ch.PublishWithDeferredConfirmWithContext(
+				ctx,
+				p.exchange.Name,
+				string(rk),
+				p.opts.Mandatory,
+				p.opts.Immediate,
+				pub,
+			)
+			if err != nil {
+				return fmt.Errorf("publish message %d: %w", i, err)
+			}
+			// Invoke callback with delivery tag and wait function
+			p.opts.OnConfirm(conf.DeliveryTag, func(waitCtx context.Context) bool {
+				if waitCtx != nil {
+					acked, err := conf.WaitContext(waitCtx)
+					if err != nil {
+						p.opts.OnError(err)
+					}
+					return acked
+				}
+				return conf.Wait()
+			})
+		} else {
+			// Regular publish or batch confirm mode
+			err := ch.PublishWithContext(
+				ctx,
+				p.exchange.Name,
+				string(rk),
+				p.opts.Mandatory,
+				p.opts.Immediate,
+				pub,
+			)
+			if err != nil {
+				return fmt.Errorf("publish message %d: %w", i, err)
+			}
 		}
 	}
 
-	// Wait for all confirmations if enabled
-	if p.opts.ConfirmMode {
+	// Handle confirmations based on mode
+	if p.opts.ConfirmMode && p.opts.OnConfirm == nil {
+		// Batch mode: wait for all confirmations synchronously
+		msgLen := len(msgs)
+
 		p.stateMu.RLock()
 		confCh := p.confirmCh
 		p.stateMu.RUnlock()
 		if confCh == nil {
-			return errors.New("confirmation channel not available")
+			return ErrConfirmNotAvailable
 		}
 
 		timeout := p.opts.ConfirmTimeout
@@ -149,17 +191,16 @@ func (p *publisher) Publish(ctx context.Context, rk RoutingKey, msgs ...Message)
 			timeout = defaultConfirmTimeout
 		}
 
-		// Wait for all confirmations
-		for i := 0; i < len(msgs); i++ {
+		for i := 0; i < msgLen; i++ {
 			select {
 			case c := <-confCh:
 				if !c.Ack {
-					return fmt.Errorf("message %d not acked by broker", i)
+					return fmt.Errorf("message %d: %w", i, ErrMessageNotAcked)
 				}
 			case <-ctx.Done():
 				return ctx.Err()
 			case <-time.After(timeout):
-				return fmt.Errorf("confirmation timeout for message %d", i)
+				return fmt.Errorf("message %d: %w", i, ErrConfirmTimeout)
 			}
 		}
 	}
@@ -167,8 +208,8 @@ func (p *publisher) Publish(ctx context.Context, rk RoutingKey, msgs ...Message)
 	return nil
 }
 
-// Unregister removes the publisher from the broker's registry and closes it.
-func (p *publisher) Unregister() {
+// Release removes the publisher from the broker's registry and closes it.
+func (p *publisher) Release() {
 	if p.broker == nil {
 		return
 	}
@@ -192,7 +233,7 @@ func (p *publisher) run() {
 		reconnectDelay = defaultReconnectDelay
 	}
 
-	p.makeReady(
+	_ = p.makeReady(
 		ctx,
 		autoReconnect,
 		reconnectDelay,
@@ -205,19 +246,19 @@ func (p *publisher) run() {
 func (p *publisher) connect(ctx context.Context) error {
 	conn, err := p.broker.connMgr.assign(ctx, p.role)
 	if err != nil {
-		return fmt.Errorf("assign connection: %w", err)
+		return wrapError("assign connection", err)
 	}
 
 	ch, err := conn.Channel()
 	if err != nil {
-		return fmt.Errorf("open channel: %w", err)
+		return wrapError("open channel", err)
 	}
 
 	var confCh <-chan amqp.Confirmation
 	if p.opts.ConfirmMode {
 		if err := ch.Confirm(false); err != nil {
 			_ = ch.Close()
-			return fmt.Errorf("enable confirm: %w", err)
+			return wrapError("enable confirm mode", err)
 		}
 		// NotifyPublish is used to preserve strict ordering of acks/nacks.
 		// Alternative: NotifyConfirm returns separate ack/nack channels:
@@ -267,7 +308,7 @@ func (p *publisher) disconnect() {
 func (p *publisher) monitor(ctx context.Context) error {
 	ch := p.Channel()
 	if ch == nil {
-		return errors.New("channel not available")
+		return ErrChannelNotAvailable
 	}
 
 	closeCh := ch.NotifyClose(make(chan *amqp.Error, 1))
@@ -276,11 +317,12 @@ func (p *publisher) monitor(ctx context.Context) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	case err := <-closeCh:
-		if err != nil && p.opts.OnError != nil {
-			p.opts.OnError(fmt.Errorf("channel closed: %w", err))
+		amqpErr := newAMQPError("channel closed", err)
+		if amqpErr != nil && p.opts.OnError != nil {
+			p.opts.OnError(amqpErr)
 		}
 		p.disconnect()
-		return err
+		return amqpErr
 	}
 }
 
@@ -304,7 +346,7 @@ func (p *publisher) handleReturns(ctx context.Context) {
 			}
 			// Call user callback if provided
 			if p.opts.OnReturn != nil {
-				msg := returnToMessage(&r)
+				msg := amqpReturnToMessage(&r)
 				msg.broker = p.broker
 				p.opts.OnReturn(msg)
 			}
