@@ -11,14 +11,3 @@ func hash(value interface{}) string {
 	hash := md5.Sum([]byte(text))
 	return hex.EncodeToString(hash[:])
 }
-
-func cloneMap[T ~map[string]interface{}](src T) T {
-	if src == nil {
-		return nil
-	}
-	dst := make(T, len(src))
-	for k, v := range src {
-		dst[k] = v
-	}
-	return dst
-}
