@@ -124,10 +124,10 @@ type consumer struct {
 	handler Handler
 	// consumer-specific state
 	cancelCh <-chan string
-	// track handlers
-	wg sync.WaitGroup
 	// track consumption state
 	consuming atomic.Bool
+	// track handlers
+	consumeWg sync.WaitGroup
 }
 
 var _ Consumer = (*consumer)(nil)
@@ -206,7 +206,7 @@ func (c *consumer) Consume(ctx context.Context) error {
 // Note: Wait() may return between messages if no handlers are running.
 // To stop the consumer entirely, cancel the context passed to Consume().
 func (c *consumer) Wait() {
-	c.wg.Wait()
+	c.consumeWg.Wait()
 }
 
 // Get synchronously fetches one message from the queue (polling).
@@ -430,17 +430,17 @@ func (c *consumer) handleDeliveries(ctx context.Context, deliveries <-chan amqp.
 	case workers <= 0:
 		// spawns a goroutine for each message
 		processor = func(msg *Message) {
-			c.wg.Add(1)
+			c.consumeWg.Add(1)
 			go func() {
-				defer c.wg.Done()
+				defer c.consumeWg.Done()
 				c.processMessage(ctx, msg)
 			}()
 		}
 	case workers == 1:
 		// processes messages one at a time
 		processor = func(msg *Message) {
-			c.wg.Add(1)
-			defer c.wg.Done()
+			c.consumeWg.Add(1)
+			defer c.consumeWg.Done()
 			c.processMessage(ctx, msg)
 		}
 	default:
@@ -454,11 +454,11 @@ func (c *consumer) handleDeliveries(ctx context.Context, deliveries <-chan amqp.
 			case semaphore <- struct{}{}:
 			}
 
-			c.wg.Add(1)
+			c.consumeWg.Add(1)
 			go func() {
 				defer func() {
 					<-semaphore // release semaphore
-					c.wg.Done()
+					c.consumeWg.Done()
 				}()
 				c.processMessage(ctx, msg)
 			}()
