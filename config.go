@@ -26,6 +26,9 @@ const (
 	// Size 2: One for publishers/control, one for consumers (recommended)
 	defaultConnPoolSize = 1
 
+	// Default cache TTL for endpoints
+	defaultCacheTTL = 5 * time.Minute
+
 	// Default reconnection backoff
 	defaultReconnectMin = 500 * time.Millisecond
 	defaultReconnectMax = 30 * time.Second
