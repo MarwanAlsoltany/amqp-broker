@@ -3,6 +3,7 @@ package broker
 import (
 	"context"
 	"fmt"
+	"io"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -49,6 +50,17 @@ type Broker struct {
 	// Consumer registry for managed consumers
 	consumers   map[string]Consumer
 	consumersMu sync.Mutex
+
+	// General purpose cache for endpoints
+	cache    sync.Map // map[string]*cacheItem[Endpoint|Publisher|Consumer]
+	cacheTTL time.Duration
+}
+
+// cacheItem tracks usage metadata for cached publishers
+type cacheItem[T any] struct {
+	value    T
+	refCount atomic.Int32
+	lastUsed atomic.Int64
 }
 
 // BrokerOption configures a Broker instance.
@@ -144,6 +156,18 @@ func WithOnConnectionBlocked(handler ConnectionBlockHandler) BrokerOption {
 	}
 }
 
+// WithCache enables caching of one-off endpoints (e.g. Broker.Publish calls)
+// Endpoints are reused across calls with the same parameters, improving performance.
+// ttl: how long to keep idle cached endpoints (default: 5 minutes)
+func WithCache(ttl time.Duration) BrokerOption {
+	return func(b *Broker) {
+		if ttl <= 0 {
+			ttl = defaultCacheTTL
+		}
+		b.cacheTTL = ttl
+	}
+}
+
 // NewBroker creates a new Broker and establishes the initial control connection.
 // It starts a background goroutine to maintain the control connection.
 func NewBroker(opts ...BrokerOption) (*Broker, error) {
@@ -187,6 +211,37 @@ func NewBroker(opts ...BrokerOption) (*Broker, error) {
 	// Initialize all managed connections
 	if err := b.connMgr.init(ctx); err != nil {
 		return nil, err
+	}
+
+	// Start cache cleanup goroutine if caching is enabled
+	if b.cacheTTL > 0 {
+		go func() {
+			ticker := time.NewTicker(b.cacheTTL / 2)
+			defer ticker.Stop()
+
+			for {
+				select {
+				case <-b.ctx.Done():
+					return
+				case <-ticker.C:
+					b.cache.Range(func(k, v any) bool {
+						item := v.(*cacheItem[any])
+						// Check if idle (no active references and past TTL)
+						if item.refCount.Load() == 0 {
+							lastUsed := time.Unix(0, item.lastUsed.Load())
+							if time.Since(lastUsed) > b.cacheTTL {
+								// Remove from tracking and close if it is an io.Closer
+								if value, ok := item.value.(io.Closer); ok {
+									value.Close()
+								}
+								b.cache.Delete(k)
+							}
+						}
+						return true
+					})
+				}
+			}
+		}()
 	}
 
 	return b, nil
@@ -490,7 +545,7 @@ func (b *Broker) NewConsumer(opts *ConsumerOptions, q Queue, h Handler) (Consume
 	return c, nil
 }
 
-// Publish performs a one-off publish using a pooled channel.
+// Publish performs a one-off publish using a cached publisher when caching is enabled.
 // For high-throughput scenarios with confirmations, prefer NewPublisher.
 func (b *Broker) Publish(ctx context.Context, exchange, routingKey string, msg ...Message) error {
 	if b.closed.Load() {
@@ -504,6 +559,53 @@ func (b *Broker) Publish(ctx context.Context, exchange, routingKey string, msg .
 	}
 	rk := RoutingKey(routingKey)
 
+	// Use cached publisher if enabled
+	if b.cacheTTL > 0 {
+		// Generate cache key from exchange properties
+		cacheKey := "publisher:" + hash(e)
+		cacheExtend := func(item *cacheItem[Publisher]) {
+			item.refCount.Add(-1)
+			item.lastUsed.Store(time.Now().UnixNano())
+		}
+
+		// Fast path: reuse existing cached publisher
+		if v, ok := b.cache.Load(cacheKey); ok {
+			item := v.(*cacheItem[Publisher])
+			item.refCount.Add(1)
+			defer cacheExtend(item)
+			return item.value.Publish(ctx, rk, msg...)
+		}
+
+		// Slow path: create new cached publisher
+		p, err := b.NewPublisher(nil, e)
+		if err != nil {
+			return err
+		}
+
+		// Store usage item with publisher pointer
+		item := &cacheItem[Publisher]{value: p}
+		item.refCount.Store(1)
+		item.lastUsed.Store(time.Now().UnixNano())
+
+		// Handle race: another goroutine may have created it
+		if actual, loaded := b.cache.LoadOrStore(cacheKey, item); loaded {
+			// Lost race, close ours and use the winner
+			p.Close()
+			item := actual.(*cacheItem[Publisher])
+			item.refCount.Add(1)
+			defer func() {
+				item.refCount.Add(-1)
+				item.lastUsed.Store(time.Now().UnixNano())
+			}()
+			return item.value.Publish(ctx, rk, msg...)
+		}
+
+		defer cacheExtend(item)
+
+		return p.Publish(ctx, rk, msg...)
+	}
+
+	// Fallback to one-off publisher
 	p, err := b.NewPublisher(nil, e)
 	if err != nil {
 		return err
@@ -514,6 +616,7 @@ func (b *Broker) Publish(ctx context.Context, exchange, routingKey string, msg .
 }
 
 // Consume is a convenience method that creates and starts a consumer.
+// The consumer is closed automatically when the context is cancelled.
 func (b *Broker) Consume(ctx context.Context, queue string, handler Handler) error {
 	// Lookup queue in declarations
 	q, err := b.lookupQueue(queue, false)
@@ -521,14 +624,14 @@ func (b *Broker) Consume(ctx context.Context, queue string, handler Handler) err
 		return err
 	}
 
-	// Create and start consumer
+	// Create one-off consumer
 	c, err := b.NewConsumer(nil, q, handler)
 	if err != nil {
 		return err
 	}
 	defer c.Close()
 
-	// Block until context cancelled or error
+	// Block until context cancelled
 	return c.Consume(ctx)
 }
 
