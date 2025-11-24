@@ -38,20 +38,20 @@ func LoggingMiddleware(logger *slog.Logger) Middleware {
 	return func(next Handler) Handler {
 		return func(ctx context.Context, msg *Message) (AckAction, error) {
 			logger.Info("message received",
-				"message_id", msg.MessageID,
+				"messageID", msg.MessageID,
 			)
 
 			action, err := next(ctx, msg)
 
 			if err != nil {
 				logger.Error("message processing failed",
-					"message_id", msg.MessageID,
+					"messageID", msg.MessageID,
 					"error", err,
 					"action", action.String(),
 				)
 			} else {
 				logger.Info("message processed",
-					"message_id", msg.MessageID,
+					"messageID", msg.MessageID,
 					"action", action.String(),
 				)
 			}
@@ -73,8 +73,8 @@ func MetricsMiddleware(logger *slog.Logger) Middleware {
 			duration := time.Since(start)
 
 			logger.Debug("message timing",
-				"message_id", msg.MessageID,
-				"duration_ms", duration.Milliseconds(),
+				"messageID", msg.MessageID,
+				"durationMS", duration.Milliseconds(),
 			)
 
 			return action, err
@@ -92,7 +92,7 @@ func RecoveryMiddleware(logger *slog.Logger) Middleware {
 			defer func() {
 				if r := recover(); r != nil {
 					logger.Error("panic recovered",
-						"message_id", msg.MessageID,
+						"messageID", msg.MessageID,
 						"panic", r,
 					)
 					action = AckActionNackRequeue

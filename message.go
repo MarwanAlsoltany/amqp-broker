@@ -15,7 +15,7 @@ import (
 type Message struct {
 	/* core fields used in both directions (incoming and outgoing) */
 	Body            []byte
-	Headers         amqp.Table
+	Headers         Arguments
 	ContentType     string // MIME type, default: "application/octet-stream"
 	ContentEncoding string // MIME encoding
 	DeliveryMode    uint8  // 1=non-persistent, 2=persistent
@@ -100,7 +100,7 @@ func (m *Message) Copy() Message {
 	nm := *m
 	// msg.broker = nil
 	if m.Headers != nil {
-		nm.Headers = make(amqp.Table, len(m.Headers))
+		nm.Headers = make(Arguments, len(m.Headers))
 		maps.Copy(nm.Headers, m.Headers)
 	}
 	return nm
@@ -108,6 +108,7 @@ func (m *Message) Copy() Message {
 
 // amqpMetadata contains metadata and methods specific to consumed messages.
 // It should be nil for outgoing messages.
+// The fields are internal aliases to prevent exposing implementation details.
 type amqpMetadata struct {
 	_delivery *amqp.Delivery
 	_return   *amqp.Return
@@ -148,8 +149,8 @@ func (am *amqpMetadata) ReturnDetails() *amqpReturnDetails {
 	}
 }
 
-// publishingFromMessage converts the Message to amqp.Publishing for sending (internal use).
-func publishingFromMessage(msg *Message) amqp.Publishing {
+// amqpPublishingFromMessage converts the Message to amqp.Publishing for sending (internal use).
+func amqpPublishingFromMessage(msg *Message) amqp.Publishing {
 	return amqp.Publishing{
 		Headers:         msg.Headers,
 		ContentType:     msg.ContentType,
@@ -168,8 +169,8 @@ func publishingFromMessage(msg *Message) amqp.Publishing {
 	}
 }
 
-// deliveryToMessage populates a Message from an amqp.Delivery (internal use).
-func deliveryToMessage(d *amqp.Delivery) Message {
+// amqpDeliveryToMessage populates a Message from an delivery (internal use).
+func amqpDeliveryToMessage(d *amqp.Delivery) Message {
 	return Message{
 		Body:          d.Body,
 		Headers:       d.Headers,
@@ -188,8 +189,8 @@ func deliveryToMessage(d *amqp.Delivery) Message {
 	}
 }
 
-// returnToMessage populates a Message from an amqp.Return (internal use).
-func returnToMessage(r *amqp.Return) Message {
+// amqpReturnToMessage populates a Message from an return_ (internal use).
+func amqpReturnToMessage(r *amqp.Return) Message {
 	return Message{
 		Body:          r.Body,
 		Headers:       r.Headers,

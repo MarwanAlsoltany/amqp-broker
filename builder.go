@@ -5,8 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"time"
-
-	amqp "github.com/rabbitmq/amqp091-go"
 )
 
 // MessageBuilder provides a fluent interface for constructing messages.
@@ -83,19 +81,17 @@ func (b *MessageBuilder) Timestamp(t time.Time) *MessageBuilder {
 	return b
 }
 
-// ===== Headers =====
-
 // Header adds or updates a single header.
 func (b *MessageBuilder) Header(key string, value interface{}) *MessageBuilder {
 	if b.msg.Headers == nil {
-		b.msg.Headers = make(amqp.Table)
+		b.msg.Headers = make(Arguments)
 	}
 	b.msg.Headers[key] = value
 	return b
 }
 
 // Headers replaces all headers with the provided map.
-func (b *MessageBuilder) Headers(headers amqp.Table) *MessageBuilder {
+func (b *MessageBuilder) Headers(headers Arguments) *MessageBuilder {
 	b.msg.Headers = headers
 	return b
 }
@@ -146,6 +142,12 @@ func (b *MessageBuilder) UserID(userID string) *MessageBuilder {
 // AppID sets the application identifier.
 func (b *MessageBuilder) AppID(appID string) *MessageBuilder {
 	b.msg.AppID = appID
+	return b
+}
+
+// Now sets the message timestamp to the current time.
+func (b *MessageBuilder) Now() *MessageBuilder {
+	b.msg.Timestamp = time.Now()
 	return b
 }
 
