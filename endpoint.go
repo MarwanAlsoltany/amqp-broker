@@ -6,16 +6,14 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-
-	amqp "github.com/rabbitmq/amqp091-go"
 )
 
 // Endpoint represents a publisher or consumer with access to its connection and channel.
 type Endpoint interface {
 	// Connection returns the current connection (may be nil if not connected).
-	Connection() *amqp.Connection
+	Connection() *Connection
 	// Channel returns the current channel (may be nil if not connected).
-	Channel() *amqp.Channel
+	Channel() *Channel
 	// Exchange declares an exchange on the endpoint's channel.
 	Exchange(Exchange) error
 	// Queue declares a queue on the endpoint's channel.
@@ -24,8 +22,8 @@ type Endpoint interface {
 	Binding(Binding) error
 	// Close stops the endpoint and releases resources.
 	Close() error
-	// Unregister removes the endpoint from the broker's registry and closes it.
-	Unregister()
+	// Release removes the endpoint from the broker's registry and closes it.
+	Release()
 }
 
 // endpointRole indicates the intended use of a connection.
@@ -48,8 +46,8 @@ type endpoint struct {
 
 	// Lifecycle state
 	stateMu sync.RWMutex
-	conn    *amqp.Connection
-	ch      *amqp.Channel
+	conn    *Connection
+	ch      *Channel
 	closed  atomic.Bool
 	ready   atomic.Bool
 	readyCh chan struct{}
@@ -81,17 +79,21 @@ func (e *endpoint) Binding(b Binding) error {
 }
 
 // Connection returns the current connection (may be nil).
-func (e *endpoint) Connection() *amqp.Connection {
+func (e *endpoint) Connection() *Connection {
 	e.stateMu.RLock()
 	defer e.stateMu.RUnlock()
 	return e.conn
 }
 
 // Channel returns the current channel (may be nil).
-func (e *endpoint) Channel() *amqp.Channel {
+func (e *endpoint) Channel() *Channel {
 	e.stateMu.RLock()
 	defer e.stateMu.RUnlock()
-	return e.ch
+	ch := e.ch
+	if ch != nil && ch.IsClosed() {
+		return nil
+	}
+	return ch
 }
 
 // Close stops the endpoint and releases resources.
@@ -122,16 +124,17 @@ func (e *endpoint) waitReady(ctx context.Context) bool {
 // makeReady handles the reconnection loop for an endpoint.
 // The connect function should establish connection/channel and return error.
 // The monitor function should wait for disconnection events and return error/nil.
+// Returns error if connection fails and auto-reconnect is disabled, or if context is cancelled.
 func (e *endpoint) makeReady(
 	ctx context.Context,
 	autoReconnect bool,
 	reconnectDelay time.Duration,
 	connect func(context.Context) error,
 	monitor func(context.Context) error,
-) {
+) error {
 	for {
 		if e.closed.Load() {
-			return
+			return ErrBrokerClosed
 		}
 
 		// Prepare for connection attempt
@@ -145,10 +148,10 @@ func (e *endpoint) makeReady(
 		// Connect
 		if err := connect(ctx); err != nil {
 			if errors.Is(err, context.Canceled) {
-				return
+				return err
 			}
 			if !autoReconnect {
-				return
+				return err
 			}
 			time.Sleep(reconnectDelay)
 			continue
@@ -166,13 +169,13 @@ func (e *endpoint) makeReady(
 		// Monitor for disconnection
 		if err := monitor(ctx); err != nil {
 			if errors.Is(err, context.Canceled) {
-				return
+				return err
 			}
 		}
 
 		// Disconnected - reconnect if enabled
 		if !autoReconnect {
-			return
+			return ErrConnectionClosed
 		}
 		time.Sleep(reconnectDelay)
 	}
