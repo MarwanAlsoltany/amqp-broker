@@ -3,7 +3,6 @@ package broker
 import (
 	"context"
 	"fmt"
-	"io"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -36,31 +35,23 @@ type Broker struct {
 	reconnectMin time.Duration
 	reconnectMax time.Duration
 
-	// Topology and declaration caching
-	topology   *Topology
-	topologyMu sync.RWMutex
-
-	// Cache of declared exchanges, queues, and bindings
-	declarations sync.Map // map[string]struct{}
+	// Topology manager for declared exchanges, queues, and bindings
+	topologyMgr *topologyManager
 
 	// Publisher registry for managed publishers
 	publishers   map[string]Publisher
 	publishersMu sync.Mutex
+	// Cached publisher pool for one-off publishes
+	publishersPool *pool[Publisher]
 
 	// Consumer registry for managed consumers
 	consumers   map[string]Consumer
 	consumersMu sync.Mutex
+	// unlike publisher, pooling is not needed for consumers
+	// as they are long-lived and get destroyed after use
 
-	// General purpose cache for endpoints
-	cache    sync.Map // map[string]*cacheItem[Endpoint|Publisher|Consumer]
+	// Cache TTL for pools
 	cacheTTL time.Duration
-}
-
-// cacheItem tracks usage metadata for cached publishers
-type cacheItem[T any] struct {
-	value    T
-	refCount atomic.Int32
-	lastUsed atomic.Int64
 }
 
 // BrokerOption configures a Broker instance.
@@ -99,7 +90,7 @@ func WithContext(ctx context.Context) BrokerOption {
 func WithConnectionPoolSize(n int) BrokerOption {
 	return func(b *Broker) {
 		if n <= 0 {
-			n = defaultConnPoolSize
+			n = defaultConnectionPoolSize
 		}
 		b.connPoolSize = n
 	}
@@ -156,15 +147,14 @@ func WithOnConnectionBlocked(handler ConnectionBlockHandler) BrokerOption {
 	}
 }
 
-// WithCache enables caching of one-off endpoints (e.g. Broker.Publish calls)
-// Endpoints are reused across calls with the same parameters, improving performance.
-// ttl: how long to keep idle cached endpoints (default: 5 minutes)
+// WithCache enables pooling of one-off endpoints (e.g. Broker.Publish calls)
+// Publishers are reused across calls with the same parameters, improving performance.
+// TTL (time-to-live) is how long to keep idle pooled endpoints (default: 5 minutes)
 func WithCache(ttl time.Duration) BrokerOption {
 	return func(b *Broker) {
 		if ttl <= 0 {
 			ttl = defaultCacheTTL
 		}
-		b.cacheTTL = ttl
 	}
 }
 
@@ -177,11 +167,12 @@ func NewBroker(opts ...BrokerOption) (*Broker, error) {
 		url:          defaultBrokerURL,
 		ctx:          ctx,
 		cancel:       cancel,
-		connPoolSize: defaultConnPoolSize,
+		connPoolSize: defaultConnectionPoolSize,
 		publishers:   make(map[string]Publisher),
 		consumers:    make(map[string]Consumer),
 		reconnectMin: defaultReconnectMin,
 		reconnectMax: defaultReconnectMax,
+		topologyMgr:  newTopologyManager(), // Initialize singleton topology manager
 	}
 
 	for _, opt := range opts {
@@ -189,10 +180,10 @@ func NewBroker(opts ...BrokerOption) (*Broker, error) {
 	}
 
 	if b.reconnectMin <= 0 {
-		return nil, fmt.Errorf("reconnect min must be positive: %w", ErrInvalidReconnectConfig)
+		return nil, fmt.Errorf("%w: min must be positive", ErrInvalidReconnectConfig)
 	}
 	if b.reconnectMax <= b.reconnectMin {
-		return nil, fmt.Errorf("reconnect max must be greater than min: %w", ErrInvalidReconnectConfig)
+		return nil, fmt.Errorf("%w: max must be greater than min", ErrInvalidReconnectConfig)
 	}
 
 	b.connMgr = newConnectionManager(b.url, b.connCfg, b.connPoolSize)
@@ -213,35 +204,12 @@ func NewBroker(opts ...BrokerOption) (*Broker, error) {
 		return nil, err
 	}
 
-	// Start cache cleanup goroutine if caching is enabled
 	if b.cacheTTL > 0 {
-		go func() {
-			ticker := time.NewTicker(b.cacheTTL / 2)
-			defer ticker.Stop()
+		b.publishersPool = newPool[Publisher](b.cacheTTL)
 
-			for {
-				select {
-				case <-b.ctx.Done():
-					return
-				case <-ticker.C:
-					b.cache.Range(func(k, v any) bool {
-						item := v.(*cacheItem[any])
-						// Check if idle (no active references and past TTL)
-						if item.refCount.Load() == 0 {
-							lastUsed := time.Unix(0, item.lastUsed.Load())
-							if time.Since(lastUsed) > b.cacheTTL {
-								// Remove from tracking and close if it is an io.Closer
-								if value, ok := item.value.(io.Closer); ok {
-									value.Close()
-								}
-								b.cache.Delete(k)
-							}
-						}
-						return true
-					})
-				}
-			}
-		}()
+		if err := b.publishersPool.init(ctx); err != nil {
+			return nil, err
+		}
 	}
 
 	return b, nil
@@ -288,163 +256,96 @@ func (b *Broker) Close() error {
 	// Cancel background context
 	b.cancel()
 
+	var errs []error
+
 	// Close all managed publishers
 	b.publishersMu.Lock()
 	for _, pe := range b.publishers {
-		_ = pe.Close()
+		if err := pe.Close(); err != nil {
+			errs = append(errs, err)
+		}
 	}
 	b.publishersMu.Unlock()
 
 	// Close all managed consumers
 	b.consumersMu.Lock()
 	for _, ce := range b.consumers {
-		_ = ce.Close()
+		if err := ce.Close(); err != nil {
+			errs = append(errs, err)
+		}
 	}
 	b.consumersMu.Unlock()
 
 	// Close connection manager
 	if b.connMgr != nil {
-		b.connMgr.close()
+		if err := b.connMgr.Close(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+
+	// Close all pooled publishers
+	if b.publishersPool != nil {
+		if err := b.publishersPool.Close(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+
+	if len(errs) > 0 {
+		return fmt.Errorf("%w: %v", ErrBrokerClose, errs)
 	}
 
 	return nil
 }
 
 // Declare applies the given topology to the broker (exchanges, queues, and bindings).
-// The topology is cached and will be reapplied on reconnection.
+// The topology is merged with existing topology and will be reapplied on reconnection.
 func (b *Broker) Declare(t *Topology) error {
-	b.topologyMu.Lock()
-	b.topology = t
-	b.topologyMu.Unlock()
-
 	ch, err := b.Channel()
 	if err != nil {
 		return wrapError("get control channel", err)
 	}
 	defer ch.Close()
 
-	// Declare all exchanges
-	for _, e := range t.Exchanges {
-		if err := b.declareExchange(ch, e); err != nil {
-			return err
-		}
-	}
-
-	// Declare all queues
-	for _, q := range t.Queues {
-		if err := b.declareQueue(ch, q); err != nil {
-			return err
-		}
-	}
-
-	// Declare all bindings
-	for _, bn := range t.Bindings {
-		if err := b.declareBinding(ch, bn); err != nil {
-			return err
-		}
-	}
-
-	return nil
+	return b.topologyMgr.declare(ch, t)
 }
 
-// declareExchange declares an exchange if not already cached.
-// The channel parameter should be the control channel or an endpoint's channel.
-func (b *Broker) declareExchange(ch *Channel, e Exchange) error {
-	if e.Name == "" {
-		return ErrEmptyExchangeName
+// Delete removes the given topology from the broker (exchanges, queues, and bindings).
+// Bindings are removed first, then queues, then exchanges (reverse order of declaration).
+func (b *Broker) Delete(t *Topology) error {
+	ch, err := b.Channel()
+	if err != nil {
+		return wrapError("get control channel", err)
 	}
+	defer ch.Close()
 
-	if _, loaded := b.declarations.LoadOrStore(hash(e), e); loaded {
-		return nil // already declared
-	}
-
-	if err := e.Declare(ch); err != nil {
-		b.declarations.Delete(hash(e)) // Remove from cache if failed
-		return wrapEntityError("declare exchange", e.Name, err)
-	}
-
-	return nil
+	return b.topologyMgr.delete(ch, t)
 }
 
-// declareQueue declares a queue if not already cached.
-// The channel parameter should be the control channel or an endpoint's channel.
-func (b *Broker) declareQueue(ch *Channel, q Queue) error {
-	if q.Name == "" {
-		return ErrEmptyQueueName
+// Verify checks that the given topology exists with correct configuration.
+// For exchanges and queues, uses passive declarations. For bindings, redeclares them (idempotent).
+func (b *Broker) Verify(t *Topology) error {
+	ch, err := b.Channel()
+	if err != nil {
+		return wrapError("get control channel", err)
 	}
+	defer ch.Close()
 
-	if _, loaded := b.declarations.LoadOrStore(hash(q), q); loaded {
-		return nil
-	}
-
-	if err := q.Declare(ch); err != nil {
-		b.declarations.Delete(hash(q)) // Remove from cache if failed
-		return wrapEntityError("declare queue", q.Name, err)
-	}
-
-	return nil
+	return b.topologyMgr.verify(ch, t)
 }
 
-// declareBinding declares a binding if not already cached.
-// The channel parameter should be the control channel or an endpoint's channel.
-func (b *Broker) declareBinding(ch *Channel, bn Binding) error {
-	if bn.Source == "" || bn.Destination == "" {
-		return ErrEmptyBindingName
+// Sync synchronizes the broker's topology to match the desired state exactly.
+// It deletes entities that exist but are not in the desired topology,
+// then declares entities from the desired topology.
+// This provides declarative topology management - specify desired state and Sync makes it so.
+// Note that sync is aware of the topology declared on this Broker, it does not inspect the server directly.
+func (b *Broker) Sync(t *Topology) error {
+	ch, err := b.Channel()
+	if err != nil {
+		return wrapError("get control channel", err)
 	}
+	defer ch.Close()
 
-	if _, loaded := b.declarations.LoadOrStore(hash(bn), bn); loaded {
-		return nil
-	}
-
-	if err := bn.Declare(ch); err != nil {
-		b.declarations.Delete(hash(bn)) // Remove from cache if failed
-		entity := fmt.Sprintf("%s binding %s -> %s", bn.Type, bn.Source, bn.Destination)
-		return wrapEntityError("declare", entity, err)
-	}
-
-	return nil
-}
-
-func (b *Broker) lookupExchange(name string, strict bool) (Exchange, error) {
-	// Check cached declarations
-	var found Exchange
-	b.declarations.Range(func(key, value interface{}) bool {
-		if e, ok := value.(Exchange); ok && e.Name == name {
-			found = e
-			return false // stop iteration
-		}
-		return true
-	})
-
-	// If not found, return default exchange config
-	if found.Name == "" {
-		if !strict {
-			return defaultExchange(name), nil
-		}
-		return Exchange{}, wrapEntityError("lookup exchange", name, ErrNotFoundTopology)
-	}
-
-	return found, nil
-}
-
-func (b *Broker) lookupQueue(name string, strict bool) (Queue, error) {
-	var found Queue
-	b.declarations.Range(func(key, value interface{}) bool {
-		if q, ok := value.(Queue); ok && q.Name == name {
-			found = q
-			return false
-		}
-		return true
-	})
-
-	if found.Name == "" {
-		if !strict {
-			return defaultQueue(name), nil
-		}
-		return Queue{}, wrapEntityError("lookup queue", name, ErrNotFoundTopology)
-	}
-
-	return found, nil
+	return b.topologyMgr.sync(ch, t)
 }
 
 // NewPublisher creates a managed Publisher that owns a dedicated connection.
@@ -462,7 +363,7 @@ func (b *Broker) NewPublisher(opts *PublisherOptions, e Exchange) (Publisher, er
 
 	// load last declared exchange by name from topology
 	// this allows users to pass minimal exchange info
-	if te := b.topology.Exchange(e.Name); te != nil {
+	if te := b.topologyMgr.exchange(e.Name); te != nil {
 		e = *te
 	}
 
@@ -511,7 +412,7 @@ func (b *Broker) NewConsumer(opts *ConsumerOptions, q Queue, h Handler) (Consume
 
 	// load last declared queue by name from topology
 	// this allows users to pass minimal queue info
-	if tq := b.topology.Queue(q.Name); tq != nil {
+	if tq := b.topologyMgr.queue(q.Name); tq != nil {
 		q = *tq
 	}
 
@@ -552,57 +453,28 @@ func (b *Broker) Publish(ctx context.Context, exchange, routingKey string, msg .
 		return ErrBrokerClosed
 	}
 
-	// Lookup exchange in declarations
-	e, err := b.lookupExchange(exchange, false)
-	if err != nil {
-		return err
+	// Lookup exchange from topology manager or use default
+	var e Exchange
+	if te := b.topologyMgr.exchange(exchange); te != nil {
+		e = *te
+	} else {
+		e = NewExchange(exchange)
 	}
 	rk := RoutingKey(routingKey)
 
-	// Use cached publisher if enabled
-	if b.cacheTTL > 0 {
-		// Generate cache key from exchange properties
-		cacheKey := "publisher:" + hash(e)
-		cacheExtend := func(item *cacheItem[Publisher]) {
-			item.refCount.Add(-1)
-			item.lastUsed.Store(time.Now().UnixNano())
-		}
+	// Use pooled publisher if enabled
+	if b.publishersPool != nil {
+		key := "publisher:" + hash(e)
 
-		// Fast path: reuse existing cached publisher
-		if v, ok := b.cache.Load(cacheKey); ok {
-			item := v.(*cacheItem[Publisher])
-			item.refCount.Add(1)
-			defer cacheExtend(item)
-			return item.value.Publish(ctx, rk, msg...)
-		}
-
-		// Slow path: create new cached publisher
-		p, err := b.NewPublisher(nil, e)
+		publisher, release, err := b.publishersPool.acquire(key, func() (Publisher, error) {
+			return b.NewPublisher(nil, e)
+		})
 		if err != nil {
 			return err
 		}
+		defer release()
 
-		// Store usage item with publisher pointer
-		item := &cacheItem[Publisher]{value: p}
-		item.refCount.Store(1)
-		item.lastUsed.Store(time.Now().UnixNano())
-
-		// Handle race: another goroutine may have created it
-		if actual, loaded := b.cache.LoadOrStore(cacheKey, item); loaded {
-			// Lost race, close ours and use the winner
-			p.Close()
-			item := actual.(*cacheItem[Publisher])
-			item.refCount.Add(1)
-			defer func() {
-				item.refCount.Add(-1)
-				item.lastUsed.Store(time.Now().UnixNano())
-			}()
-			return item.value.Publish(ctx, rk, msg...)
-		}
-
-		defer cacheExtend(item)
-
-		return p.Publish(ctx, rk, msg...)
+		return publisher.Publish(ctx, rk, msg...)
 	}
 
 	// Fallback to one-off publisher
@@ -618,10 +490,12 @@ func (b *Broker) Publish(ctx context.Context, exchange, routingKey string, msg .
 // Consume is a convenience method that creates and starts a consumer.
 // The consumer is closed automatically when the context is cancelled.
 func (b *Broker) Consume(ctx context.Context, queue string, handler Handler) error {
-	// Lookup queue in declarations
-	q, err := b.lookupQueue(queue, false)
-	if err != nil {
-		return err
+	// Lookup queue from topology manager or use default
+	var q Queue
+	if tq := b.topologyMgr.queue(queue); tq != nil {
+		q = *tq
+	} else {
+		q = NewQueue(queue)
 	}
 
 	// Create one-off consumer
@@ -638,7 +512,7 @@ func (b *Broker) Consume(ctx context.Context, queue string, handler Handler) err
 // Transaction executes fn within an AMQP transaction.
 // The transaction commits if fn returns nil, otherwise rolls back.
 //
-// Deprecated: Transactions are SLOW (~2x overhead). Use publisher confirms instead.
+// Deprecated: Do not use, transactions are SLOW (~2x overhead) in AMQP. Use publisher confirms instead.
 func (b *Broker) Transaction(ctx context.Context, fn func(*Channel) error) error {
 	ch, err := b.Channel()
 	if err != nil {
