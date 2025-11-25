@@ -129,6 +129,14 @@ func (am *amqpMetadata) Reject() error {
 	return am._delivery.Reject(false)
 }
 
+// IsRedelivered returns true if this message was redelivered.
+func (am *amqpMetadata) IsRedelivered() bool {
+	if am._delivery == nil {
+		return false
+	}
+	return am._delivery.Redelivered
+}
+
 type amqpReturnDetails struct {
 	ReplyCode  uint16
 	ReplyText  string

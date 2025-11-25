@@ -96,7 +96,7 @@ func RecoveryMiddleware(logger *slog.Logger) Middleware {
 						"panic", r,
 					)
 					action = AckActionNackRequeue
-					err = fmt.Errorf("panic: %v", r)
+					err = fmt.Errorf("%w: panic: %v", ErrConsumerMiddleware, r)
 				}
 			}()
 			return next(ctx, msg)
@@ -126,7 +126,7 @@ func TimeoutMiddleware(timeout time.Duration) Middleware {
 			case res := <-done:
 				return res.action, res.err
 			case <-ctx.Done():
-				return AckActionNackRequeue, fmt.Errorf("message processing timeout after %v", timeout)
+				return AckActionNackRequeue, fmt.Errorf("%w: message processing timeout after %vms", ErrConsumerMiddleware, timeout.Milliseconds())
 			}
 		}
 	}
