@@ -3,6 +3,7 @@ package broker
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -45,7 +46,7 @@ type endpoint struct {
 	role   endpointRole
 
 	// Lifecycle state
-	stateMu sync.RWMutex
+	mu      sync.RWMutex
 	conn    *Connection
 	ch      *Channel
 	closed  atomic.Bool
@@ -64,32 +65,38 @@ func newEndpoint(id string, b *Broker, role endpointRole) *endpoint {
 }
 
 // Exchange declares an exchange on the endpoint's channel.
-func (e *endpoint) Exchange(ex Exchange) error {
-	return e.broker.declareExchange(e.Channel(), ex)
+func (ep *endpoint) Exchange(e Exchange) error {
+	return ep.broker.topologyMgr.declare(ep.Channel(), &Topology{
+		Exchanges: []Exchange{e},
+	})
 }
 
 // Queue declares a queue on the endpoint's channel.
-func (e *endpoint) Queue(q Queue) error {
-	return e.broker.declareQueue(e.Channel(), q)
+func (ep *endpoint) Queue(q Queue) error {
+	return ep.broker.topologyMgr.declare(ep.Channel(), &Topology{
+		Queues: []Queue{q}},
+	)
 }
 
 // Binding declares a binding on the endpoint's channel.
-func (e *endpoint) Binding(b Binding) error {
-	return e.broker.declareBinding(e.Channel(), b)
+func (ep *endpoint) Binding(b Binding) error {
+	return ep.broker.topologyMgr.declare(ep.Channel(), &Topology{
+		Bindings: []Binding{b}},
+	)
 }
 
 // Connection returns the current connection (may be nil).
-func (e *endpoint) Connection() *Connection {
-	e.stateMu.RLock()
-	defer e.stateMu.RUnlock()
-	return e.conn
+func (ep *endpoint) Connection() *Connection {
+	ep.mu.RLock()
+	defer ep.mu.RUnlock()
+	return ep.conn
 }
 
 // Channel returns the current channel (may be nil).
-func (e *endpoint) Channel() *Channel {
-	e.stateMu.RLock()
-	defer e.stateMu.RUnlock()
-	ch := e.ch
+func (ep *endpoint) Channel() *Channel {
+	ep.mu.RLock()
+	defer ep.mu.RUnlock()
+	ch := ep.ch
 	if ch != nil && ch.IsClosed() {
 		return nil
 	}
@@ -97,21 +104,34 @@ func (e *endpoint) Channel() *Channel {
 }
 
 // Close stops the endpoint and releases resources.
-func (e *endpoint) Close() error {
-	e.closed.Store(true)
+func (ep *endpoint) Close() error {
+	ep.closed.Store(true)
+
+	// Close the channel to stop all operations
+	ep.mu.Lock()
+	defer ep.mu.Unlock()
+
+	if ep.ch != nil {
+		err := ep.ch.Close()
+		ep.ch = nil
+		if err != nil {
+			return fmt.Errorf("%w: %s", ErrEndpointClose, err)
+		}
+	}
+
 	return nil
 }
 
 // waitReady blocks until the endpoint is ready or context is done.
-func (e *endpoint) waitReady(ctx context.Context) bool {
-	if e.ready.Load() {
+func (ep *endpoint) waitReady(ctx context.Context) bool {
+	if ep.ready.Load() {
 		return true
 	}
-	e.stateMu.RLock()
-	ch := e.readyCh
-	e.stateMu.RUnlock()
+	ep.mu.RLock()
+	ch := ep.readyCh
+	ep.mu.RUnlock()
 	if ch == nil {
-		return e.ready.Load()
+		return ep.ready.Load()
 	}
 	select {
 	case <-ch:
@@ -125,7 +145,7 @@ func (e *endpoint) waitReady(ctx context.Context) bool {
 // The connect function should establish connection/channel and return error.
 // The monitor function should wait for disconnection events and return error/nil.
 // Returns error if connection fails and auto-reconnect is disabled, or if context is cancelled.
-func (e *endpoint) makeReady(
+func (ep *endpoint) makeReady(
 	ctx context.Context,
 	autoReconnect bool,
 	reconnectDelay time.Duration,
@@ -133,17 +153,17 @@ func (e *endpoint) makeReady(
 	monitor func(context.Context) error,
 ) error {
 	for {
-		if e.closed.Load() {
+		if ep.closed.Load() {
 			return ErrBrokerClosed
 		}
 
 		// Prepare for connection attempt
 		// recreate readyCh for (re)connection attempt
-		e.stateMu.Lock()
-		if e.readyCh == nil {
-			e.readyCh = make(chan struct{})
+		ep.mu.Lock()
+		if ep.readyCh == nil {
+			ep.readyCh = make(chan struct{})
 		}
-		e.stateMu.Unlock()
+		ep.mu.Unlock()
 
 		// Connect
 		if err := connect(ctx); err != nil {
@@ -158,13 +178,13 @@ func (e *endpoint) makeReady(
 		}
 
 		// Mark ready
-		e.ready.Store(true)
-		e.stateMu.Lock()
-		if e.readyCh != nil {
-			close(e.readyCh)
-			e.readyCh = nil
+		ep.ready.Store(true)
+		ep.mu.Lock()
+		if ep.readyCh != nil {
+			close(ep.readyCh)
+			ep.readyCh = nil
 		}
-		e.stateMu.Unlock()
+		ep.mu.Unlock()
 
 		// Monitor for disconnection
 		if err := monitor(ctx); err != nil {
