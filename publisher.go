@@ -120,12 +120,12 @@ func (p *publisher) Publish(ctx context.Context, rk RoutingKey, msgs ...Message)
 		return ErrPublisherFlowPaused
 	}
 
-	ch := p.endpoint.Channel()
+	ch := p.Channel()
 	if ch == nil {
 		return ErrPublisherNotConnected
 	}
 
-	err := p.endpoint.broker.declareExchange(ch, p.exchange)
+	err := p.Exchange(p.exchange)
 	if err != nil {
 		return wrapError("declare exchange", err)
 	}
@@ -145,7 +145,7 @@ func (p *publisher) Publish(ctx context.Context, rk RoutingKey, msgs ...Message)
 				pub,
 			)
 			if err != nil {
-				return fmt.Errorf("publish message %d: %w", i, err)
+				return fmt.Errorf("%w: publish message %d: %v", ErrPublisherPublish, i, err)
 			}
 			// Invoke callback with delivery tag and wait function
 			p.opts.OnConfirm(conf.DeliveryTag, func(waitCtx context.Context) bool {
@@ -169,7 +169,7 @@ func (p *publisher) Publish(ctx context.Context, rk RoutingKey, msgs ...Message)
 				pub,
 			)
 			if err != nil {
-				return fmt.Errorf("publish message %d: %w", i, err)
+				return fmt.Errorf("%w: publish message %d: %v", ErrPublisherPublish, i, err)
 			}
 		}
 	}
@@ -179,11 +179,11 @@ func (p *publisher) Publish(ctx context.Context, rk RoutingKey, msgs ...Message)
 		// Batch mode: wait for all confirmations synchronously
 		msgLen := len(msgs)
 
-		p.stateMu.RLock()
+		p.mu.RLock()
 		confCh := p.confirmCh
-		p.stateMu.RUnlock()
+		p.mu.RUnlock()
 		if confCh == nil {
-			return ErrConfirmNotAvailable
+			return ErrPublisherConfirmNotAvailable
 		}
 
 		timeout := p.opts.ConfirmTimeout
@@ -195,12 +195,12 @@ func (p *publisher) Publish(ctx context.Context, rk RoutingKey, msgs ...Message)
 			select {
 			case c := <-confCh:
 				if !c.Ack {
-					return fmt.Errorf("message %d: %w", i, ErrMessageNotAcked)
+					return fmt.Errorf("message %d: %w", i, ErrPublisherMessageConfirm)
 				}
 			case <-ctx.Done():
 				return ctx.Err()
 			case <-time.After(timeout):
-				return fmt.Errorf("message %d: %w", i, ErrConfirmTimeout)
+				return fmt.Errorf("message %d: %w", i, ErrPublisherConfirmTimeout)
 			}
 		}
 	}
@@ -264,7 +264,10 @@ func (p *publisher) connect(ctx context.Context) error {
 		// Alternative: NotifyConfirm returns separate ack/nack channels:
 		// ackCh, nackCh := ch.NotifyConfirm(make(chan uint64), make(chan uint64))
 		// However, NotifyConfirm may lose ordering when acks and nacks are interleaved.
-		confCh = ch.NotifyPublish(make(chan amqp.Confirmation, 1))
+		// NotifyPublish must be consumed to avoid deadlocks.
+		// The channel must have sufficient buffer for outstanding publishes,
+		// but we use unbuffered and consume in background goroutine instead.
+		confCh = ch.NotifyPublish(make(chan amqp.Confirmation))
 	}
 
 	// Set up return notification for undeliverable messages
@@ -273,17 +276,22 @@ func (p *publisher) connect(ctx context.Context) error {
 	// Set up flow control notification
 	flowCh := ch.NotifyFlow(make(chan bool, 1))
 
-	p.stateMu.Lock()
+	p.mu.Lock()
 	p.conn = conn
 	p.ch = ch
 	p.confirmCh = confCh
 	p.returnCh = returnCh
 	p.flowCh = flowCh
-	p.stateMu.Unlock()
+	p.mu.Unlock()
 
 	// Start background handlers
 	go p.handleReturns(ctx)
 	go p.handleFlow(ctx)
+	// When using deferred confirmations, we still need to consume from confCh
+	// to avoid deadlocks, even though the confirmations are handled by DeferredConfirmation objects
+	if p.opts.ConfirmMode && p.opts.OnConfirm != nil {
+		go p.handleConfirmations(ctx)
+	}
 
 	return nil
 }
@@ -292,7 +300,7 @@ func (p *publisher) connect(ctx context.Context) error {
 func (p *publisher) disconnect() {
 	p.ready.Store(false)
 
-	p.stateMu.Lock()
+	p.mu.Lock()
 	if p.ch != nil {
 		_ = p.ch.Close()
 		p.ch = nil
@@ -301,7 +309,7 @@ func (p *publisher) disconnect() {
 	p.confirmCh = nil
 	p.returnCh = nil
 	p.flowCh = nil
-	p.stateMu.Unlock()
+	p.mu.Unlock()
 }
 
 // monitor watches for channel closures.
@@ -329,9 +337,9 @@ func (p *publisher) monitor(ctx context.Context) error {
 // handleReturns processes undeliverable messages returned by the server.
 func (p *publisher) handleReturns(ctx context.Context) {
 	for {
-		p.stateMu.RLock()
+		p.mu.RLock()
 		returnCh := p.returnCh
-		p.stateMu.RUnlock()
+		p.mu.RUnlock()
 
 		if returnCh == nil {
 			return
@@ -358,9 +366,9 @@ func (p *publisher) handleReturns(ctx context.Context) {
 // handleFlow processes flow control notifications from the server.
 func (p *publisher) handleFlow(ctx context.Context) {
 	for {
-		p.stateMu.RLock()
+		p.mu.RLock()
 		flowCh := p.flowCh
-		p.stateMu.RUnlock()
+		p.mu.RUnlock()
 
 		if flowCh == nil {
 			return
@@ -378,6 +386,31 @@ func (p *publisher) handleFlow(ctx context.Context) {
 			if p.opts.OnFlow != nil {
 				p.opts.OnFlow(active)
 			}
+		}
+	}
+}
+
+// handleConfirmations consumes confirmations from the channel to prevent deadlocks.
+// This is needed when using deferred confirmation mode because the channel must be consumed
+// even though confirmations are handled by DeferredConfirmation objects.
+func (p *publisher) handleConfirmations(ctx context.Context) {
+	for {
+		p.mu.RLock()
+		confirmCh := p.confirmCh
+		p.mu.RUnlock()
+
+		if confirmCh == nil {
+			return
+		}
+
+		select {
+		case <-ctx.Done():
+			return
+		case _, ok := <-confirmCh:
+			if !ok {
+				return
+			}
+			// Simply discard - DeferredConfirmation handles the actual confirmation
 		}
 	}
 }

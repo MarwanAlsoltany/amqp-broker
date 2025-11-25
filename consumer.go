@@ -3,7 +3,6 @@ package broker
 import (
 	"context"
 	"fmt"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -27,11 +26,6 @@ type Consumer interface {
 	// Get synchronously fetches one message from the queue (polling).
 	// Returns nil if queue is empty. For continuous delivery, use Consume().
 	Get(autoAck bool) (*Message, error)
-	// Pause pauses message deliveries from the server.
-	// Call Resume() to restart deliveries.
-	Pause() error
-	// Resume resumes message deliveries from the server.
-	Resume() error
 	// Cancel stops consuming messages without closing the channel.
 	// Call Consume() again to restart consumption.
 	Cancel() error
@@ -126,8 +120,9 @@ type consumer struct {
 	cancelCh <-chan string
 	// track consumption state
 	consuming atomic.Bool
-	// track handlers
-	consumeWg sync.WaitGroup
+	// track in-flight message handlers using atomic counter
+	// (avoids WaitGroup race when Add() called from async handlers while Wait() may be called concurrently)
+	processing atomic.Int32
 }
 
 var _ Consumer = (*consumer)(nil)
@@ -206,7 +201,10 @@ func (c *consumer) Consume(ctx context.Context) error {
 // Note: Wait() may return between messages if no handlers are running.
 // To stop the consumer entirely, cancel the context passed to Consume().
 func (c *consumer) Wait() {
-	c.consumeWg.Wait()
+	// Poll the atomic counter until all processing completes
+	for c.processing.Load() > 0 {
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 // Get synchronously fetches one message from the queue (polling).
@@ -246,35 +244,6 @@ func (c *consumer) Cancel() error {
 	// Use consumer.id as the consumer tag
 	if err := ch.Cancel(c.id, false); err != nil {
 		return wrapError("cancel consumer", err)
-	}
-
-	return nil
-}
-
-// Pause pauses message deliveries from the server.
-// Call Resume() to restart deliveries.
-func (c *consumer) Pause() error {
-	ch := c.Channel()
-	if ch == nil || ch.IsClosed() {
-		return ErrChannelNotAvailable
-	}
-
-	if err := ch.Flow(false); err != nil {
-		return wrapError("pause flow", err)
-	}
-
-	return nil
-}
-
-// Resume resumes message deliveries from the server.
-func (c *consumer) Resume() error {
-	ch := c.Channel()
-	if ch == nil || ch.IsClosed() {
-		return ErrChannelNotAvailable
-	}
-
-	if err := ch.Flow(true); err != nil {
-		return wrapError("resume flow", err)
 	}
 
 	return nil
@@ -327,7 +296,7 @@ func (c *consumer) connect(ctx context.Context) error {
 	}
 
 	// Declare queue
-	err = c.endpoint.broker.declareQueue(ch, c.queue)
+	err = c.Queue(c.queue)
 	if err != nil {
 		return wrapError("declare queue", err)
 	}
@@ -360,11 +329,11 @@ func (c *consumer) connect(ctx context.Context) error {
 	// Set up cancel notification
 	cancelCh := ch.NotifyCancel(make(chan string, 1))
 
-	c.stateMu.Lock()
+	c.mu.Lock()
 	c.conn = conn
 	c.ch = ch
 	c.cancelCh = cancelCh
-	c.stateMu.Unlock()
+	c.mu.Unlock()
 
 	// Mark as consuming
 	c.consuming.Store(true)
@@ -379,14 +348,14 @@ func (c *consumer) connect(ctx context.Context) error {
 func (c *consumer) disconnect() {
 	c.ready.Store(false)
 
-	c.stateMu.Lock()
+	c.mu.Lock()
 	if c.ch != nil {
 		_ = c.ch.Close()
 		c.ch = nil
 	}
 	// Clear consumer-specific state
 	c.cancelCh = nil
-	c.stateMu.Unlock()
+	c.mu.Unlock()
 }
 
 // monitor watches for channel closures and cancellations.
@@ -398,9 +367,9 @@ func (c *consumer) monitor(ctx context.Context) error {
 
 	closeCh := ch.NotifyClose(make(chan *amqp.Error, 1))
 
-	c.stateMu.RLock()
+	c.mu.RLock()
 	cancelCh := c.cancelCh
-	c.stateMu.RUnlock()
+	c.mu.RUnlock()
 
 	select {
 	case <-ctx.Done():
@@ -430,36 +399,35 @@ func (c *consumer) handleDeliveries(ctx context.Context, deliveries <-chan amqp.
 	case workers <= 0:
 		// spawns a goroutine for each message
 		processor = func(msg *Message) {
-			c.consumeWg.Add(1)
+			c.processing.Add(1)
 			go func() {
-				defer c.consumeWg.Done()
+				defer c.processing.Add(-1)
 				c.processMessage(ctx, msg)
 			}()
 		}
 	case workers == 1:
 		// processes messages one at a time
 		processor = func(msg *Message) {
-			c.consumeWg.Add(1)
-			defer c.consumeWg.Done()
+			c.processing.Add(1)
+			defer c.processing.Add(-1)
 			c.processMessage(ctx, msg)
 		}
 	default:
 		// uses a semaphore to limit concurrent handlers
 		semaphore := make(chan struct{}, workers)
 		processor = func(msg *Message) {
-			// acquire semaphore
-			select {
-			case <-ctx.Done():
-				return
-			case semaphore <- struct{}{}:
-			}
-
-			c.consumeWg.Add(1)
+			c.processing.Add(1)
 			go func() {
-				defer func() {
-					<-semaphore // release semaphore
-					c.consumeWg.Done()
-				}()
+				defer c.processing.Add(-1)
+
+				// acquire semaphore
+				select {
+				case <-ctx.Done():
+					return
+				case semaphore <- struct{}{}:
+					defer func() { <-semaphore }() // release semaphore
+				}
+
 				c.processMessage(ctx, msg)
 			}()
 		}
@@ -487,7 +455,7 @@ func (c *consumer) processMessage(ctx context.Context, msg *Message) {
 
 	// Notify user of handler error if callback provided
 	if err != nil && c.opts.OnError != nil {
-		c.opts.OnError(fmt.Errorf("handler failed for message %s: %w", msg.MessageID, err))
+		c.opts.OnError(fmt.Errorf("%w: handler failed for message %s: %w", ErrConsumerHandler, msg.MessageID, err))
 	}
 
 	if c.opts.AutoAck {
@@ -508,6 +476,6 @@ func (c *consumer) processMessage(ctx context.Context, msg *Message) {
 
 	// Notify user of ack/nack error if callback provided
 	if ackErr != nil && c.opts.OnError != nil {
-		c.opts.OnError(fmt.Errorf("%s failed for message %s: %w", action.String(), msg.MessageID, ackErr))
+		c.opts.OnError(fmt.Errorf("%w: %s failed for message %s: %v", ErrConsumerAck, action.String(), msg.MessageID, ackErr))
 	}
 }
