@@ -2,6 +2,7 @@ package broker
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -69,7 +70,7 @@ type connectionManager struct {
 // Size determines how many long-lived connections are maintained.
 func newConnectionManager(url string, cfg *Config, size int) *connectionManager {
 	if size <= 0 {
-		size = defaultConnPoolSize
+		size = defaultConnectionPoolSize
 	}
 	return &connectionManager{
 		url:  url,
@@ -232,14 +233,14 @@ func (m *connectionManager) assign(_ context.Context, role endpointRole) (*Conne
 // replace replaces a failed connection at the given index with a new one.
 func (m *connectionManager) replace(idx int) error {
 	if m.closed.Load() {
-		return fmt.Errorf("connection manager closed")
+		return ErrConnectionManagerClosed
 	}
 
 	m.connMu.Lock()
 	defer m.connMu.Unlock()
 
 	if idx < 0 || idx >= len(m.pool) {
-		return fmt.Errorf("invalid connection index: %d", idx)
+		return fmt.Errorf("%w: invalid connection index: %d", ErrConnectionIndexRange, idx)
 	}
 
 	// Close old connection if still open
@@ -251,7 +252,7 @@ func (m *connectionManager) replace(idx int) error {
 	conn, err := newConnection(m.url, m.cfg)
 	if err != nil {
 		m.pool[idx] = nil
-		return fmt.Errorf("replace connection %d: %w", idx, err)
+		return fmt.Errorf("%w: replace connection %d: %v", ErrConnectionReplace, idx, err)
 	}
 
 	m.pool[idx] = conn
@@ -342,9 +343,9 @@ func (m *connectionManager) index(conn *Connection) int {
 }
 
 // close closes all managed connections.
-func (m *connectionManager) close() {
+func (m *connectionManager) Close() error {
 	if !m.closed.CompareAndSwap(false, true) {
-		return
+		return ErrConnectionManagerClosed
 	}
 
 	// Cancel monitoring goroutines
@@ -353,10 +354,19 @@ func (m *connectionManager) close() {
 	m.connMu.Lock()
 	defer m.connMu.Unlock()
 
+	var errs []error
 	for i, conn := range m.pool {
 		if conn != nil {
-			_ = conn.Close()
+			if err := conn.Close(); err != nil {
+				errs = append(errs, fmt.Errorf("close connection %d: %w", i, err))
+			}
 			m.pool[i] = nil
 		}
 	}
+
+	if len(errs) > 0 {
+		return fmt.Errorf("%w: %v", ErrConnectionClose, errors.Join(errs...))
+	}
+
+	return nil
 }
