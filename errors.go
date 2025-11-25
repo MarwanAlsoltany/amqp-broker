@@ -11,35 +11,53 @@ import (
 var (
 	/* broker lifecycle errors */
 	ErrBrokerClosed = errors.New("broker is closed")
+	ErrBrokerClose  = errors.New("broker close error")
 	/* endpoint lifecycle errors */
-	ErrPublisherClosed = errors.New("publisher is closed")
-	ErrConsumerClosed  = errors.New("consumer is closed")
+	ErrEndpointClosed  = errors.New("endpoint is closed")
+	ErrEndpointClose   = errors.New("endpoint close error")
 	ErrNotReadyTimeout = errors.New("not ready within timeout")
 	ErrNoAutoReconnect = errors.New("auto-reconnect is disabled")
+	/* connection errors */
+	ErrConnectionNotAvailable   = errors.New("connection not available")
+	ErrConnectionNotInitialized = errors.New("connection not initialized")
+	ErrConnectionClosed         = errors.New("connection is closed")
+	ErrConnectionClose          = errors.New("connection manager close error")
+	ErrConnectionReplace        = errors.New("connection manager replace error")
+	ErrConnectionManagerClosed  = errors.New("connection manager is closed")
+	ErrConnectionIndexRange     = errors.New("connection index out of range")
 	/* channel errors */
 	ErrChannelNotAvailable = errors.New("channel not available")
 	ErrChannelClosed       = errors.New("channel is closed")
-	/* connection errors */
-	ErrConnectionNotAvailable   = errors.New("connection not available")
-	ErrConnectionClosed         = errors.New("connection is closed")
-	ErrConnectionNotInitialized = errors.New("connection not initialized")
-	ErrConnectionManagerClosed  = errors.New("connection manager is closed")
-	ErrConnectionIndexRange     = errors.New("connection index out of range")
+	/* pool errors */
+	ErrPoolClosed = errors.New("pool is closed")
+	ErrPoolClose  = errors.New("pool close error")
 	/* publisher-specific errors */
-	ErrPublisherNotConnected = errors.New("publisher not connected")
-	ErrPublisherFlowPaused   = errors.New("publisher flow paused by server")
-	ErrConfirmNotAvailable   = errors.New("confirmation channel not available")
-	ErrMessageNotAcked       = errors.New("message not acknowledged by broker")
-	ErrConfirmTimeout        = errors.New("confirmation timeout")
+	ErrPublisherClosed              = errors.New("publisher is closed")
+	ErrPublisherNotConnected        = errors.New("publisher not connected")
+	ErrPublisherFlowPaused          = errors.New("publisher flow paused by server")
+	ErrPublisherPublish             = errors.New("publish message error")
+	ErrPublisherConfirmNotAvailable = errors.New("confirmation channel not available")
+	ErrPublisherMessageConfirm      = errors.New("message not confirmed by server")
+	ErrPublisherConfirmTimeout      = errors.New("confirmation timeout")
 	/* consumer-specific errors */
+	ErrConsumerClosed       = errors.New("consumer is closed")
 	ErrConsumerNotConnected = errors.New("consumer not connected")
+	ErrConsumerCancelled    = errors.New("consumer cancelled")
+	ErrConsumerAck          = errors.New("consumer acknowledgment error")
+	ErrConsumerHandler      = errors.New("consumer handler error")
+	ErrConsumerMiddleware   = errors.New("consumer middleware error")
 	/* configuration errors */
-	ErrInvalidReconnectConfig = errors.New("invalid reconnect configuration")
+	ErrInvalidReconnectConfig = errors.New("reconnect config invalid")
+	ErrMessageBuild           = errors.New("message build error")
 	/* topology errors */
-	ErrEmptyExchangeName = errors.New("exchange name cannot be empty")
-	ErrEmptyQueueName    = errors.New("queue name cannot be empty")
-	ErrEmptyBindingName  = errors.New("binding source and destination cannot be empty")
-	ErrNotFoundTopology  = errors.New("not found in topology")
+	ErrTopology           = errors.New("topology error")
+	ErrTopologyDeclare    = errors.New("topology declare error")
+	ErrTopologyDelete     = errors.New("topology delete error")
+	ErrTopologyVerify     = errors.New("topology verify error")
+	ErrTopologyValidation = errors.New("topology validation error")
+	ErrEmptyExchangeName  = errors.New("exchange name cannot be empty")
+	ErrEmptyQueueName     = errors.New("queue name cannot be empty")
+	ErrEmptyBindingFields = errors.New("binding source and destination cannot be empty")
 )
 
 // BrokerError provides structured error information with context.
