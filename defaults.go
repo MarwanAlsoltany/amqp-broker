@@ -24,7 +24,7 @@ const (
 
 	// Default connection pool size
 	// Size 2: One for publishers/control, one for consumers (recommended)
-	defaultConnPoolSize = 1
+	defaultConnectionPoolSize = 1
 
 	// Default cache TTL for endpoints
 	defaultCacheTTL = 5 * time.Minute
@@ -47,6 +47,12 @@ const (
 	// Default exchange kind
 	defaultExchangeType = "direct"
 
+	// Default exchange durability
+	defaultExchangeDurable = true
+
+	// Default queue durability
+	defaultQueueDurable = true
+
 	// Default prefetch count for consumers
 	defaultPrefetchCount = 1
 
@@ -56,29 +62,6 @@ const (
 	// Default content type
 	defaultContentType = "application/octet-stream"
 )
-
-func defaultExchange(name string) Exchange {
-	return Exchange{
-		Name:       name,
-		Type:       defaultExchangeType,
-		Durable:    true,
-		AutoDelete: false,
-		Internal:   false,
-		NoWait:     false,
-		Args:       nil,
-	}
-}
-
-func defaultQueue(name string) Queue {
-	return Queue{
-		Name:       name,
-		Durable:    true,
-		AutoDelete: false,
-		Exclusive:  false,
-		NoWait:     false,
-		Args:       nil,
-	}
-}
 
 // defaultPublishOptions returns PublishOptions with defaults applied.
 func defaultPublisherOptions() PublisherOptions {
