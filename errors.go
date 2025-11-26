@@ -3,135 +3,140 @@ package broker
 import (
 	"errors"
 	"fmt"
+	"slices"
+	"strings"
 
 	amqp "github.com/rabbitmq/amqp091-go"
 )
 
 // Sentinel errors for common failure conditions.
 var (
-	/* broker lifecycle errors */
-	ErrBrokerClosed = errors.New("broker is closed")
-	ErrBrokerClose  = errors.New("broker close error")
-	/* endpoint lifecycle errors */
-	ErrEndpointClosed  = errors.New("endpoint is closed")
-	ErrEndpointClose   = errors.New("endpoint close error")
-	ErrNotReadyTimeout = errors.New("not ready within timeout")
-	ErrNoAutoReconnect = errors.New("auto-reconnect is disabled")
-	/* connection errors */
-	ErrConnectionNotAvailable   = errors.New("connection not available")
-	ErrConnectionNotInitialized = errors.New("connection not initialized")
-	ErrConnectionClosed         = errors.New("connection is closed")
-	ErrConnectionClose          = errors.New("connection manager close error")
-	ErrConnectionReplace        = errors.New("connection manager replace error")
-	ErrConnectionManagerClosed  = errors.New("connection manager is closed")
-	ErrConnectionIndexRange     = errors.New("connection index out of range")
-	/* channel errors */
-	ErrChannelNotAvailable = errors.New("channel not available")
-	ErrChannelClosed       = errors.New("channel is closed")
-	/* pool errors */
-	ErrPoolClosed = errors.New("pool is closed")
-	ErrPoolClose  = errors.New("pool close error")
-	/* publisher-specific errors */
-	ErrPublisherClosed              = errors.New("publisher is closed")
-	ErrPublisherNotConnected        = errors.New("publisher not connected")
-	ErrPublisherFlowPaused          = errors.New("publisher flow paused by server")
-	ErrPublisherPublish             = errors.New("publish message error")
-	ErrPublisherConfirmNotAvailable = errors.New("confirmation channel not available")
-	ErrPublisherMessageConfirm      = errors.New("message not confirmed by server")
-	ErrPublisherConfirmTimeout      = errors.New("confirmation timeout")
-	/* consumer-specific errors */
-	ErrConsumerClosed       = errors.New("consumer is closed")
-	ErrConsumerNotConnected = errors.New("consumer not connected")
-	ErrConsumerCancelled    = errors.New("consumer cancelled")
-	ErrConsumerAck          = errors.New("consumer acknowledgment error")
-	ErrConsumerHandler      = errors.New("consumer handler error")
-	ErrConsumerMiddleware   = errors.New("consumer middleware error")
-	/* configuration errors */
-	ErrInvalidReconnectConfig = errors.New("reconnect config invalid")
-	ErrMessageBuild           = errors.New("message build error")
-	/* topology errors */
-	ErrTopology           = errors.New("topology error")
-	ErrTopologyDeclare    = errors.New("topology declare error")
-	ErrTopologyDelete     = errors.New("topology delete error")
-	ErrTopologyVerify     = errors.New("topology verify error")
-	ErrTopologyValidation = errors.New("topology validation error")
-	ErrEmptyExchangeName  = errors.New("exchange name cannot be empty")
-	ErrEmptyQueueName     = errors.New("queue name cannot be empty")
-	ErrEmptyBindingFields = errors.New("binding source and destination cannot be empty")
+	ErrBroker                       error = new(Error)
+	ErrBrokerClosed                       = fmt.Errorf("%w: %s", ErrBroker, "closed")
+	ErrBrokerClose                        = fmt.Errorf("%w: %s", ErrBroker, "close failed")
+	ErrBrokerConfigInvalid                = fmt.Errorf("%w: %s", ErrBroker, "config invalid")
+	ErrBrokerMessageBuildFailed           = fmt.Errorf("%w: %s", ErrBroker, "message build failed")
+	ErrConnection                         = fmt.Errorf("%w %s", ErrBroker, "connection")
+	ErrConnectionClosed                   = fmt.Errorf("%w: %s", ErrConnection, "closed")
+	ErrConnectionNotAvailable             = fmt.Errorf("%w: %s", ErrConnection, "not available")
+	ErrConnectionManager                  = fmt.Errorf("%w %s", ErrConnection, "manager")
+	ErrConnectionManagerClosed            = fmt.Errorf("%w: %s", ErrConnectionManager, "closed")
+	ErrConnectionManagerClose             = fmt.Errorf("%w: %s", ErrConnectionManager, "close failed")
+	ErrConnectionManagerReplace           = fmt.Errorf("%w: %s", ErrConnectionManager, "replace failed")
+	ErrChannel                            = fmt.Errorf("%w %s", ErrConnection, "channel")
+	ErrChannelClosed                      = fmt.Errorf("%w: %s", ErrChannel, "closed")
+	ErrPool                               = fmt.Errorf("%w %s", ErrBroker, "pool")
+	ErrPoolClosed                         = fmt.Errorf("%w: %s", ErrPool, "closed")
+	ErrPoolClose                          = fmt.Errorf("%w: %s", ErrPool, "close failed")
+	ErrTopology                           = fmt.Errorf("%w %s", ErrBroker, "topology")
+	ErrTopologyDeclareFailed              = fmt.Errorf("%w: %s", ErrTopology, "declare failed")
+	ErrTopologyDeleteFailed               = fmt.Errorf("%w: %s", ErrTopology, "delete failed")
+	ErrTopologyVerifyFailed               = fmt.Errorf("%w: %s", ErrTopology, "verify failed")
+	ErrTopologyValidation                 = fmt.Errorf("%w %s", ErrTopology, "validation")
+	ErrExchangeNameEmpty                  = fmt.Errorf("%w: %s", ErrTopologyValidation, "exchange name empty")
+	ErrQueueNameEmpty                     = fmt.Errorf("%w: %s", ErrTopologyValidation, "queue name empty")
+	ErrBindingFieldsEmpty                 = fmt.Errorf("%w: %s", ErrTopologyValidation, "binding field(s) empty")
+	ErrRoutingKeyEmpty                    = fmt.Errorf("%w: %s", ErrTopologyValidation, "routing key empty")
+	ErrEndpoint                           = fmt.Errorf("%w %s", ErrBroker, "endpoint")
+	ErrEndpointClosed                     = fmt.Errorf("%w: %s", ErrEndpoint, "closed")
+	ErrEndpointClose                      = fmt.Errorf("%w: %s", ErrEndpoint, "close failed")
+	ErrNotReadyTimeout                    = fmt.Errorf("%w: %s", ErrEndpoint, "not ready within timeout")
+	ErrNoAutoReconnect                    = fmt.Errorf("%w: %s", ErrEndpoint, "auto-reconnect is disabled")
+	ErrPublisher                          = fmt.Errorf("%w %s", ErrBroker, "publisher")
+	ErrPublisherClosed                    = fmt.Errorf("%w: %s", ErrPublisher, "closed")
+	ErrPublisherNotConnected              = fmt.Errorf("%w: %s", ErrPublisher, "not connected")
+	ErrPublisherFlowPaused                = fmt.Errorf("%w: %s", ErrPublisher, "flow paused by server")
+	ErrPublisherConfirmNotAvailable       = fmt.Errorf("%w: %s", ErrPublisher, "confirmation channel not available")
+	ErrPublisherPublishFailed             = fmt.Errorf("%w: %s", ErrPublisher, "message publish failed")
+	ErrPublisherPublishConfirm            = fmt.Errorf("%w: %s", ErrPublisher, "message not confirmed by server")
+	ErrPublisherConfirmTimeout            = fmt.Errorf("%w: %s", ErrPublisher, "message confirmation timeout")
+	ErrConsumer                           = fmt.Errorf("%w %s", ErrBroker, "consumer")
+	ErrConsumerClosed                     = fmt.Errorf("%w: %s", ErrConsumer, "closed")
+	ErrConsumerNotConnected               = fmt.Errorf("%w: %s", ErrConsumer, "not connected")
+	ErrConsumerCancelled                  = fmt.Errorf("%w: %s", ErrConsumer, "cancelled")
+	ErrConsumerAckFailed                  = fmt.Errorf("%w: %s", ErrConsumer, "acknowledgment failed")
+	ErrConsumerHandler                    = fmt.Errorf("%w: %s", ErrConsumer, "handler error")
+	ErrConsumerHandlerMiddleware          = fmt.Errorf("%w: %s", ErrConsumer, "middleware error")
 )
 
-// BrokerError provides structured error information with context.
-type BrokerError struct {
-	Operation string // Operation that failed
-	Entity    string // Any entity: connection/channel/exchange/queue/binding name (optional)
+// Error provides structured error information with context.
+// This type provides a broker-agnostic interface to AMQP errors,
+// allowing users to inspect error details without depending directly
+// on the github.com/rabbitmq/amqp091-go package.
+type Error struct {
+	Operation string // Object/Operation that failed
 	Err       error  // Underlying error
 }
 
-// Error implements the error interface.
-func (e *BrokerError) Error() string {
-	if e.Entity != "" {
-		return fmt.Sprintf("%s %s: %v", e.Operation, e.Entity, e.Err)
+// Error implements the error interface and formats joined errors compactly.
+func (e *Error) Error() string {
+	text := "broker"
+	if e.Operation != "" {
+		text = fmt.Sprintf("%s: %s", text, e.Operation)
 	}
-	return fmt.Sprintf("%s: %v", e.Operation, e.Err)
+	if e.Err == nil {
+		return text
+	}
+
+	// helper for formatting a single child (special-case amqp.Error)
+	format := func(err error) string {
+		// if err == nil { return "<nil>" } // filtered earlier
+		if amqpErr, ok := err.(*amqp.Error); ok && amqpErr != nil {
+			source := "client"
+			if amqpErr.Server {
+				source = "server"
+			}
+			return fmt.Sprintf("%s (source=%s, code=%d, recoverable=%v)",
+				amqpErr.Reason, source, amqpErr.Code, amqpErr.Recover)
+		}
+		// more cases as needed ...
+		return err.Error()
+	}
+
+	// if underlying implements Unwrap() []error (e.g. errors.Join result),
+	// format children compactly (no newlines)
+	if err, ok := e.Err.(interface{ Unwrap() []error }); ok {
+		ancestors := err.Unwrap()
+		parts := make([]string, 0, len(ancestors))
+		for _, err := range ancestors {
+			parts = append(parts, format(err))
+		}
+		return fmt.Sprintf("%s: %s", text, strings.Join(parts, "; "))
+	}
+
+	return fmt.Sprintf("%s: %v", text, format(e.Err))
 }
 
-// Unwrap returns the underlying error.
-func (e *BrokerError) Unwrap() error {
+// Unwrap returns the underlying error (single unwrap).
+func (e *Error) Unwrap() error {
 	return e.Err
 }
 
-// BrokerAMQPError wraps an AMQP protocol error with additional context.
-// This type provides a broker-agnostic interface to AMQP errors,
-// allowing users to inspect error details without depending on the amqp091-go package.
-type BrokerAMQPError struct {
-	Operation string      // Operation that failed (e.g., "channel closed", "connection closed")
-	Err       *amqp.Error // Underlying AMQP error
-}
-
-// Error implements the error interface.
-func (e *BrokerAMQPError) Error() string {
-	source := "client"
-	if e.Err.Server {
-		source = "server"
-	}
-	recoverable := "non-recoverable"
-	if e.Err.Recover {
-		recoverable = "recoverable"
-	}
-	return fmt.Sprintf("%s: %s (code=%d, source=%s, %s)",
-		e.Operation, e.Err.Reason, e.Err.Code, source, recoverable)
-}
-
-// IsRecoverable returns true if this error can be recovered by reconnecting.
-func (e *BrokerAMQPError) IsRecoverable() bool {
-	return e.Err.Recover
-}
-
-// IsServerInitiated returns true if the error was initiated by the server.
-func (e *BrokerAMQPError) IsServerInitiated() bool {
-	return e.Err.Server
-}
-
-func newError(operation, entity string, err error) error {
-	if err == nil {
+// wrapError aggregates one or more underlying errors using errors.Join when appropriate.
+// It returns a broker *Error whose Unwrap() returns the joined or single error.
+// Broker Error provides context about the operation that failed via special handling for amqp.Error.
+func wrapError(operation string, errs ...error) error {
+	// filter nil errors out
+	errs = slices.DeleteFunc(errs, func(err error) bool { return err == nil })
+	if len(errs) == 0 {
 		return nil
 	}
-	return &BrokerError{Operation: operation, Entity: entity, Err: err}
-}
 
-// newAMQPError converts an amqp.Error to an AMQPError with operation context.
-// Returns nil if the input error is nil.
-func newAMQPError(operation string, err *amqp.Error) *BrokerAMQPError {
-	if err == nil {
-		return nil
+	var err error
+	if len(errs) == 1 {
+		err = errs[0]
+	} else {
+		// errors.Join returns an error that implements Unwrap() []error
+		err = errors.Join(errs...)
 	}
-	return &BrokerAMQPError{Operation: operation, Err: err}
+
+	return &Error{
+		Operation: operation,
+		Err:       err,
+	}
 }
 
-func wrapError(operation string, err error) error {
-	return newError(operation, "", err)
-}
-
-func wrapEntityError(operation, entity string, err error) error {
-	return newError(operation, entity, err)
+// wrapErrorf is a convenience wrapper around wrapError that accepts a format string.
+func wrapErrorf(operation string, format string, args ...any) error {
+	return wrapError(operation, fmt.Errorf(format, args...))
 }
