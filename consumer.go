@@ -24,50 +24,19 @@ type Consumer interface {
 	// This does not stop the consumer; messages will continue to be accepted in the background.
 	Wait()
 	// Get synchronously fetches one message from the queue (polling).
-	// Returns nil if queue is empty. For continuous delivery, use Consume().
-	Get(autoAck bool) (*Message, error)
+	// Returns nil if queue is empty. The message can be acknowledged manually
+	// (using Ack/Nack/Reject), or AutoAck option can be set to true to auto-acknowledge.
+	// For continuous delivery, use Consume().
+	Get() (*Message, error)
 	// Cancel stops consuming messages without closing the channel.
 	// Call Consume() again to restart consumption.
 	Cancel() error
 }
 
-// AckAction specifies how a message should be acknowledged.
-type AckAction int
-
-func (a AckAction) String() string {
-	switch a {
-	case AckActionAck:
-		return "ack"
-	case AckActionNackRequeue:
-		return "nack.requeue"
-	case AckActionNackDiscard:
-		return "nack.discard"
-	case AckActionNoAction:
-		return ""
-	default:
-		return "unknown"
-	}
-}
-
-const (
-	// AckActionAck acknowledges the message successfully.
-	AckActionAck AckAction = iota
-	// AckActionNackRequeue rejects the message and requeues it.
-	AckActionNackRequeue
-	// AckActionNackDiscard rejects the message without requeuing.
-	AckActionNackDiscard
-	// AckActionNoAction indicates the handler already called Ack/Nack/Reject.
-	AckActionNoAction
-)
-
-// Handler is called for each consumed message.
-// It returns an AckAction to control message acknowledgment.
-type Handler func(ctx context.Context, msg *Message) (AckAction, error)
-
 // ConsumerOptions configures Consumer behavior.
 type ConsumerOptions struct {
 	// AutoAck enables automatic message acknowledgment.
-	// If false, the handler must return an AckAction.
+	// If false, the handler must return an HandlerAction.
 	// Default: false
 	AutoAck bool
 	// PrefetchCount sets the channel prefetch limit.
@@ -102,11 +71,11 @@ type ConsumerOptions struct {
 	MaxConcurrentHandlers int
 	// OnCancel is called when the server cancels the consumer (queue deleted, failover, etc).
 	// The string parameter is the consumer tag.
-	// If nil, cancellations trigger automatic reconnection.
+	// If not specified (nil), cancellations trigger automatic reconnection.
 	OnCancel func(string)
 	// OnError is called when errors occur in background goroutines that cannot be returned.
 	// This includes message handler errors, ack/nack errors, and channel close errors.
-	// If nil, errors are silently ignored.
+	// If not specified (nil), errors are silently ignored.
 	OnError func(err error)
 }
 
@@ -168,17 +137,25 @@ func newConsumer(b *Broker, id string, opts ConsumerOptions, q Queue, h Handler)
 // After Consume() returns, the consumer is stopped and cannot be reused.
 // To consume again, create a new Consumer instance.
 func (c *consumer) Consume(ctx context.Context) error {
-	// Block until context cancelled
+	// check if context is already cancelled
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+
+	// block until context cancelled
 	<-ctx.Done()
 
-	// Disconnect consumer
+	// disconnect consumer
 	c.disconnect()
-	// Wait for all in-flight handlers to complete
+	// wait for all in-flight handlers to complete
 	c.Wait()
-	// // Restart if WaitForReady is set
+
+	// // restart if WaitForReady is set
 	// if !c.opts.NoWaitForReady {
 	// 	go c.run()
-	// 	// Wait for ready
+	// 	// wait for ready
 	// 	readyCtx, cancel := context.WithTimeout(c.broker.ctx, c.opts.ReadyTimeout)
 	// 	defer cancel()
 	// 	if !c.waitReady(readyCtx) {
@@ -201,21 +178,23 @@ func (c *consumer) Consume(ctx context.Context) error {
 // Note: Wait() may return between messages if no handlers are running.
 // To stop the consumer entirely, cancel the context passed to Consume().
 func (c *consumer) Wait() {
-	// Poll the atomic counter until all processing completes
+	// poll the atomic counter until all processing completes
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
 	for c.processing.Load() > 0 {
-		time.Sleep(10 * time.Millisecond)
+		<-ticker.C
 	}
 }
 
 // Get synchronously fetches one message from the queue (polling).
 // Returns nil if queue is empty. For continuous delivery, use Consume().
-func (c *consumer) Get(autoAck bool) (*Message, error) {
+func (c *consumer) Get() (*Message, error) {
 	ch := c.Channel()
-	if ch == nil || ch.IsClosed() {
-		return nil, ErrChannelNotAvailable
+	if ch == nil {
+		return nil, ErrChannelClosed
 	}
 
-	delivery, ok, err := ch.Get(c.queue.Name, autoAck)
+	delivery, ok, err := ch.Get(c.queue.Name, c.opts.AutoAck)
 	if err != nil {
 		return nil, wrapError("get message", err)
 	}
@@ -233,15 +212,15 @@ func (c *consumer) Get(autoAck bool) (*Message, error) {
 // Call Consume() again to restart consumption.
 func (c *consumer) Cancel() error {
 	if !c.consuming.Swap(false) {
-		return nil // Already cancelled
+		return nil // already cancelled
 	}
 
 	ch := c.Channel()
-	if ch == nil || ch.IsClosed() {
-		return ErrChannelNotAvailable
+	if ch == nil {
+		return ErrChannelClosed
 	}
 
-	// Use consumer.id as the consumer tag
+	// consumer.id is the consumer tag, see call to ch.Consume
 	if err := ch.Cancel(c.id, false); err != nil {
 		return wrapError("cancel consumer", err)
 	}
@@ -285,7 +264,7 @@ func (c *consumer) run() {
 
 // connect establishes a connection, channel, and starts consuming.
 func (c *consumer) connect(ctx context.Context) error {
-	conn, err := c.broker.connMgr.assign(ctx, c.role)
+	conn, err := c.broker.connectionMgr.assign(c.role)
 	if err != nil {
 		return wrapError("assign connection", err)
 	}
@@ -295,13 +274,19 @@ func (c *consumer) connect(ctx context.Context) error {
 		return wrapError("open channel", err)
 	}
 
-	// Declare queue
+	// set channel on endpoint before declaring topology
+	c.mu.Lock()
+	c.conn = conn
+	c.ch = ch
+	c.mu.Unlock()
+
+	// declare queue
 	err = c.Queue(c.queue)
 	if err != nil {
 		return wrapError("declare queue", err)
 	}
 
-	// Set QoS
+	// set QoS
 	prefetch := c.opts.PrefetchCount
 	if prefetch <= 0 {
 		prefetch = defaultPrefetchCount
@@ -311,7 +296,9 @@ func (c *consumer) connect(ctx context.Context) error {
 		return wrapError("set qos", err)
 	}
 
-	// Start consuming
+	// start consuming
+	// NOTE: do not use ch.ConsumeWithContext here, as it would block cancellation
+	// the code here replicates what ch.ConsumeWithContext does but in a non-blocking way
 	deliveries, err := ch.Consume(
 		c.queue.Name,
 		c.id,
@@ -326,20 +313,16 @@ func (c *consumer) connect(ctx context.Context) error {
 		return wrapError("start consuming", err)
 	}
 
-	// Set up cancel notification
+	// set up cancel notification
 	cancelCh := ch.NotifyCancel(make(chan string, 1))
 
 	c.mu.Lock()
-	c.conn = conn
-	c.ch = ch
 	c.cancelCh = cancelCh
 	c.mu.Unlock()
 
-	// Mark as consuming
-	c.consuming.Store(true)
+	c.consuming.Store(true) // mark as consuming
 
-	// Start delivery handler
-	go c.handleDeliveries(ctx, deliveries)
+	go c.handleDeliveries(ctx, deliveries) // start delivery handler
 
 	return nil
 }
@@ -349,22 +332,25 @@ func (c *consumer) disconnect() {
 	c.ready.Store(false)
 
 	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	if c.ch != nil {
 		_ = c.ch.Close()
 		c.ch = nil
 	}
-	// Clear consumer-specific state
+	// clear consumer-specific state
 	c.cancelCh = nil
-	c.mu.Unlock()
 }
 
 // monitor watches for channel closures and cancellations.
 func (c *consumer) monitor(ctx context.Context) error {
 	ch := c.Channel()
 	if ch == nil {
-		return ErrChannelNotAvailable
+		return ErrChannelClosed
 	}
 
+	// create a buffered channel to avoid deadlock
+	// library sends notification once, then closes the channel
 	closeCh := ch.NotifyClose(make(chan *amqp.Error, 1))
 
 	c.mu.RLock()
@@ -375,7 +361,7 @@ func (c *consumer) monitor(ctx context.Context) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	case err := <-closeCh:
-		amqpErr := newAMQPError("channel closed", err)
+		amqpErr := wrapError("channel closed", err)
 		if amqpErr != nil && c.opts.OnError != nil {
 			c.opts.OnError(amqpErr)
 		}
@@ -386,7 +372,7 @@ func (c *consumer) monitor(ctx context.Context) error {
 			c.opts.OnCancel(tag)
 		}
 		c.disconnect()
-		return fmt.Errorf("consumer cancelled: %s", tag)
+		return fmt.Errorf("%w: tag %q", ErrConsumerCancelled, tag)
 	}
 }
 
@@ -425,7 +411,8 @@ func (c *consumer) handleDeliveries(ctx context.Context, deliveries <-chan amqp.
 				case <-ctx.Done():
 					return
 				case semaphore <- struct{}{}:
-					defer func() { <-semaphore }() // release semaphore
+					// release semaphore
+					defer func() { <-semaphore }()
 				}
 
 				c.processMessage(ctx, msg)
@@ -453,9 +440,9 @@ func (c *consumer) handleDeliveries(ctx context.Context, deliveries <-chan amqp.
 func (c *consumer) processMessage(ctx context.Context, msg *Message) {
 	action, err := c.handler(ctx, msg)
 
-	// Notify user of handler error if callback provided
+	// notify user of handler error if callback provided
 	if err != nil && c.opts.OnError != nil {
-		c.opts.OnError(fmt.Errorf("%w: handler failed for message %s: %w", ErrConsumerHandler, msg.MessageID, err))
+		c.opts.OnError(fmt.Errorf("%w: handler failed for message %q: %w", ErrConsumerHandler, msg.MessageID, err))
 	}
 
 	if c.opts.AutoAck {
@@ -464,18 +451,18 @@ func (c *consumer) processMessage(ctx context.Context, msg *Message) {
 
 	var ackErr error
 	switch action {
-	case AckActionAck:
+	case HandlerActionAck:
 		ackErr = msg.amqpMetadata.Ack()
-	case AckActionNackRequeue:
+	case HandlerActionNackRequeue:
 		ackErr = msg.amqpMetadata.Nack(true)
-	case AckActionNackDiscard:
+	case HandlerActionNackDiscard:
 		ackErr = msg.amqpMetadata.Nack(false)
-	case AckActionNoAction:
+	case HandlerActionNoAction:
 		// handler already handled ack/nack
 	}
 
-	// Notify user of ack/nack error if callback provided
+	// notify user of ack/nack error if callback provided
 	if ackErr != nil && c.opts.OnError != nil {
-		c.opts.OnError(fmt.Errorf("%w: %s failed for message %s: %v", ErrConsumerAck, action.String(), msg.MessageID, ackErr))
+		c.opts.OnError(fmt.Errorf("%w: %s failed for message %q: %w", ErrConsumerAckFailed, action.String(), msg.MessageID, ackErr))
 	}
 }
