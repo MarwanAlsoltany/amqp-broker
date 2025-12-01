@@ -1,6 +1,8 @@
 package broker
 
-import amqp "github.com/rabbitmq/amqp091-go"
+import (
+	amqp "github.com/rabbitmq/amqp091-go"
+)
 
 /* External types */
 type (
@@ -8,5 +10,7 @@ type (
 	Config     = amqp.Config
 	Connection = amqp.Connection
 	Channel    = amqp.Channel
-	Error      = amqp.Error
+	AMQPError  = amqp.Error
 )
+
+// See: github.com/rabbitmq/amqp091-go/types.go

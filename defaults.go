@@ -6,7 +6,7 @@ import (
 	"time"
 )
 
-var defaultBrokerID string
+var defaultBrokerID string // read-only
 
 func init() {
 	hostname, err := os.Hostname()
@@ -23,7 +23,6 @@ const (
 	defaultBrokerURL = "amqp://guest:guest@localhost:5672/"
 
 	// Default connection pool size
-	// Size 2: One for publishers/control, one for consumers (recommended)
 	defaultConnectionPoolSize = 1
 
 	// Default cache TTL for endpoints
@@ -38,13 +37,16 @@ const (
 	// Default ready timeout
 	defaultReadyTimeout = 10 * time.Second
 
-	// Default confirmation timeout
+	// Default confirmation timeout for publishers
 	defaultConfirmTimeout = 5 * time.Second
+
+	// Default prefetch count for consumers
+	defaultPrefetchCount = 1
 
 	// Default concurrent handlers for consumers
 	defaultConcurrentHandlers = 0 // unlimited
 
-	// Default exchange kind
+	// Default exchange type
 	defaultExchangeType = "direct"
 
 	// Default exchange durability
@@ -53,13 +55,10 @@ const (
 	// Default queue durability
 	defaultQueueDurable = true
 
-	// Default prefetch count for consumers
-	defaultPrefetchCount = 1
-
-	// Default delivery mode (2 = persistent)
+	// Default delivery mode for messages (1=transient, 2=persistent)
 	defaultDeliveryMode = 2
 
-	// Default content type
+	// Default content type for messages
 	defaultContentType = "application/octet-stream"
 )
 
@@ -74,6 +73,10 @@ func defaultPublisherOptions() PublisherOptions {
 		ReadyTimeout:    defaultReadyTimeout,
 		NoAutoReconnect: false,
 		ReconnectDelay:  defaultReconnectDelay,
+		OnConfirm:       nil,
+		OnReturn:        nil,
+		OnFlow:          nil,
+		OnError:         nil,
 	}
 }
 
@@ -89,5 +92,7 @@ func defaultConsumerOptions() ConsumerOptions {
 		NoAutoReconnect:       false,
 		ReconnectDelay:        defaultReconnectDelay,
 		MaxConcurrentHandlers: defaultConcurrentHandlers,
+		OnCancel:              nil,
+		OnError:               nil,
 	}
 }

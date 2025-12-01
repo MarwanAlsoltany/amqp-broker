@@ -14,13 +14,13 @@ import (
 // consumption metadata via the Consumed field.
 type Message struct {
 	/* core fields used in both directions (incoming and outgoing) */
-	Body            []byte
-	Headers         Arguments
-	ContentType     string // MIME type, default: "application/octet-stream"
-	ContentEncoding string // MIME encoding
-	DeliveryMode    uint8  // 1=non-persistent, 2=persistent
-	Priority        uint8  // 0-9, 0=lowest
-	Timestamp       time.Time
+	Body            []byte    // Message payload
+	Headers         Arguments // AMQP message headers
+	ContentType     string    // MIME type, default: "application/octet-stream"
+	ContentEncoding string    // MIME encoding
+	DeliveryMode    uint8     // 1=non-persistent, 2=persistent
+	Priority        uint8     // 0-9, 0=lowest
+	Timestamp       time.Time // Message timestamp
 	/* correlation & routing */
 	CorrelationID string // For request/reply patterns
 	ReplyTo       string // Queue name for replies
@@ -31,7 +31,7 @@ type Message struct {
 	Expiration string // Message TTL (milliseconds as string, e.g., "60000")
 	Type       string // Application-specific message type
 
-	// holds metadata specific to internal implementation;
+	// holds metadata specific to internal implementation
 	*amqpMetadata
 
 	// broker is a reference to a broker instance for usage inside handlers;
@@ -96,13 +96,16 @@ func (m *Message) IsIncoming() bool {
 }
 
 // Copy creates a deep copy of the message.
+// If the message has a Broker reference, it will be nil in the copy.
 func (m *Message) Copy() Message {
 	nm := *m
-	// msg.broker = nil
+	nm.broker = nil // clear broker reference
+
 	if m.Headers != nil {
 		nm.Headers = make(Arguments, len(m.Headers))
 		maps.Copy(nm.Headers, m.Headers)
 	}
+
 	return nm
 }
 
