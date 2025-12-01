@@ -13,8 +13,10 @@ import (
 type Endpoint interface {
 	// Connection returns the current connection (may be nil if not connected).
 	Connection() *Connection
-	// Channel returns the current channel (may be nil if not connected).
+	// Channel returns the current channel (may be nil if not connected or closed).
 	Channel() *Channel
+	// Ready indicates whether the endpoint is ready for operations.
+	Ready() bool
 	// Exchange declares an exchange on the endpoint's channel.
 	Exchange(Exchange) error
 	// Queue declares a queue on the endpoint's channel.
@@ -28,11 +30,11 @@ type Endpoint interface {
 }
 
 // endpointRole indicates the intended use of a connection.
-type endpointRole int
+type endpointRole uint8
 
 const (
-	// roleControl indicates the connection is for control operations (topology management).
-	roleControl endpointRole = iota
+	// roleController indicates the connection is for control operations (topology management).
+	roleController endpointRole = iota
 	// rolePublisher indicates the connection is for publishers.
 	rolePublisher
 	// roleConsumer indicates the connection is for consumers.
@@ -45,10 +47,10 @@ type endpoint struct {
 	broker *Broker
 	role   endpointRole
 
-	// Lifecycle state
-	mu      sync.RWMutex
+	// lifecycle state
 	conn    *Connection
 	ch      *Channel
+	mu      sync.RWMutex
 	closed  atomic.Bool
 	ready   atomic.Bool
 	readyCh chan struct{}
@@ -56,6 +58,9 @@ type endpoint struct {
 
 // newEndpoint creates a new endpoint with the given ID, broker, and role.
 func newEndpoint(id string, b *Broker, role endpointRole) *endpoint {
+	if role != roleController && role != rolePublisher && role != roleConsumer {
+		role = roleController // default to control role
+	}
 	return &endpoint{
 		id:      id,
 		broker:  b,
@@ -103,11 +108,16 @@ func (ep *endpoint) Channel() *Channel {
 	return ch
 }
 
+// Ready indicates whether the endpoint is ready for operations.
+func (ep *endpoint) Ready() bool {
+	return ep.ready.Load()
+}
+
 // Close stops the endpoint and releases resources.
 func (ep *endpoint) Close() error {
 	ep.closed.Store(true)
 
-	// Close the channel to stop all operations
+	// close the channel to stop all operations
 	ep.mu.Lock()
 	defer ep.mu.Unlock()
 
@@ -115,7 +125,7 @@ func (ep *endpoint) Close() error {
 		err := ep.ch.Close()
 		ep.ch = nil
 		if err != nil {
-			return fmt.Errorf("%w: %s", ErrEndpointClose, err)
+			return fmt.Errorf("%w: %w", ErrEndpointClose, err)
 		}
 	}
 
@@ -124,6 +134,13 @@ func (ep *endpoint) Close() error {
 
 // waitReady blocks until the endpoint is ready or context is done.
 func (ep *endpoint) waitReady(ctx context.Context) bool {
+	// check if context is already cancelled
+	select {
+	case <-ctx.Done():
+		return false
+	default:
+	}
+
 	if ep.ready.Load() {
 		return true
 	}
@@ -157,7 +174,7 @@ func (ep *endpoint) makeReady(
 			return ErrBrokerClosed
 		}
 
-		// Prepare for connection attempt
+		// prepare for connection attempt
 		// recreate readyCh for (re)connection attempt
 		ep.mu.Lock()
 		if ep.readyCh == nil {
@@ -165,7 +182,7 @@ func (ep *endpoint) makeReady(
 		}
 		ep.mu.Unlock()
 
-		// Connect
+		// establish connection
 		if err := connect(ctx); err != nil {
 			if errors.Is(err, context.Canceled) {
 				return err
@@ -177,7 +194,7 @@ func (ep *endpoint) makeReady(
 			continue
 		}
 
-		// Mark ready
+		// mark ready
 		ep.ready.Store(true)
 		ep.mu.Lock()
 		if ep.readyCh != nil {
@@ -186,14 +203,14 @@ func (ep *endpoint) makeReady(
 		}
 		ep.mu.Unlock()
 
-		// Monitor for disconnection
+		// monitor for disconnection
 		if err := monitor(ctx); err != nil {
 			if errors.Is(err, context.Canceled) {
 				return err
 			}
 		}
 
-		// Disconnected - reconnect if enabled
+		// disconnected? reconnect if enabled
 		if !autoReconnect {
 			return ErrConnectionClosed
 		}

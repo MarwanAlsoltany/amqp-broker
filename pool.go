@@ -72,7 +72,7 @@ func (p *pool[T]) cleanup() error {
 	})
 
 	if len(errs) > 0 {
-		return fmt.Errorf("%w: %v", ErrConnectionClose, errors.Join(errs...))
+		return fmt.Errorf("%w: %w", ErrPoolClose, errors.Join(errs...))
 	}
 
 	return nil
@@ -81,7 +81,9 @@ func (p *pool[T]) cleanup() error {
 // Close marks the pool as closed and cleans up all idle items.
 // After calling Close, acquire will return ErrPoolClosed.
 func (p *pool[T]) Close() error {
-	p.closed.Store(true)
+	if !p.closed.CompareAndSwap(false, true) {
+		return nil
+	}
 	return p.cleanup()
 }
 
@@ -90,12 +92,11 @@ func (p *pool[T]) Close() error {
 func (p *pool[T]) acquire(key string, factory func() (T, error)) (T, func(), error) {
 	var zero T
 
-	// Check if pool is closed
 	if p.closed.Load() {
 		return zero, nil, ErrPoolClosed
 	}
 
-	// Fast path: reuse existing
+	// fast path: reuse existing
 	if v, ok := p.items.Load(key); ok {
 		item := v.(*poolItem[T])
 		item.refCount.Add(1)
@@ -106,7 +107,7 @@ func (p *pool[T]) acquire(key string, factory func() (T, error)) (T, func(), err
 		return item.value, release, nil
 	}
 
-	// Slow path: create new
+	// slow path: create new
 	value, err := factory()
 	if err != nil {
 		return zero, nil, err
@@ -116,9 +117,9 @@ func (p *pool[T]) acquire(key string, factory func() (T, error)) (T, func(), err
 	item.refCount.Store(1)
 	item.lastUsed.Store(time.Now().UnixNano())
 
-	// Handle race: another goroutine may have created it
+	// handle race: another goroutine may have created it
 	if actual, loaded := p.items.LoadOrStore(key, item); loaded {
-		// Lost race, close ours and use the winner
+		// lost race, close ours and use the winner
 		if closer, ok := any(value).(io.Closer); ok {
 			closer.Close()
 		}
