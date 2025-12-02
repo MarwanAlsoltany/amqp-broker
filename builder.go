@@ -10,8 +10,7 @@ import (
 // MessageBuilder provides a fluent interface for constructing messages.
 type MessageBuilder struct {
 	msg *Message
-	// err accumulates any errors during building.
-	err error
+	err error // accumulates any errors encountered during building
 }
 
 // NewMessageBuilder creates a new message builder with sensible defaults.
@@ -49,7 +48,7 @@ func (b *MessageBuilder) BodyJSON(v interface{}) *MessageBuilder {
 	data, err := json.Marshal(v)
 	if err != nil {
 		b.msg.Body = []byte{}
-		b.appendErr(fmt.Errorf("%w: BodyJSON marshal: %v", ErrMessageBuild, err))
+		b.appendErr(fmt.Errorf("%w: BodyJSON: %v", ErrBrokerMessageBuildFailed, err))
 	} else {
 		b.msg.Body = data
 		b.msg.ContentType = "application/json"
