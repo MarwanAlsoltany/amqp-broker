@@ -25,6 +25,7 @@ var (
 	ErrConnectionManagerReplace           = fmt.Errorf("%w: %s", ErrConnectionManager, "replace failed")
 	ErrChannel                            = fmt.Errorf("%w %s", ErrConnection, "channel")
 	ErrChannelClosed                      = fmt.Errorf("%w: %s", ErrChannel, "closed")
+	ErrChannelNotAvailable                = fmt.Errorf("%w: %s", ErrChannel, "not available")
 	ErrPool                               = fmt.Errorf("%w %s", ErrBroker, "pool")
 	ErrPoolClosed                         = fmt.Errorf("%w: %s", ErrPool, "closed")
 	ErrPoolClose                          = fmt.Errorf("%w: %s", ErrPool, "close failed")
@@ -40,8 +41,8 @@ var (
 	ErrEndpoint                           = fmt.Errorf("%w %s", ErrBroker, "endpoint")
 	ErrEndpointClosed                     = fmt.Errorf("%w: %s", ErrEndpoint, "closed")
 	ErrEndpointClose                      = fmt.Errorf("%w: %s", ErrEndpoint, "close failed")
-	ErrNotReadyTimeout                    = fmt.Errorf("%w: %s", ErrEndpoint, "not ready within timeout")
-	ErrNoAutoReconnect                    = fmt.Errorf("%w: %s", ErrEndpoint, "auto-reconnect is disabled")
+	ErrEndpointNotReadyTimeout            = fmt.Errorf("%w: %s", ErrEndpoint, "not ready within timeout")
+	ErrEndpointNoAutoReconnect            = fmt.Errorf("%w: %s", ErrEndpoint, "auto-reconnect is disabled")
 	ErrPublisher                          = fmt.Errorf("%w %s", ErrBroker, "publisher")
 	ErrPublisherClosed                    = fmt.Errorf("%w: %s", ErrPublisher, "closed")
 	ErrPublisherNotConnected              = fmt.Errorf("%w: %s", ErrPublisher, "not connected")
@@ -53,10 +54,14 @@ var (
 	ErrConsumer                           = fmt.Errorf("%w %s", ErrBroker, "consumer")
 	ErrConsumerClosed                     = fmt.Errorf("%w: %s", ErrConsumer, "closed")
 	ErrConsumerNotConnected               = fmt.Errorf("%w: %s", ErrConsumer, "not connected")
+	ErrConsumerConsumerFailed             = fmt.Errorf("%w: %s", ErrConsumer, "message consume failed")
 	ErrConsumerCancelled                  = fmt.Errorf("%w: %s", ErrConsumer, "cancelled")
 	ErrConsumerAckFailed                  = fmt.Errorf("%w: %s", ErrConsumer, "acknowledgment failed")
 	ErrConsumerHandler                    = fmt.Errorf("%w: %s", ErrConsumer, "handler error")
 	ErrConsumerHandlerMiddleware          = fmt.Errorf("%w: %s", ErrConsumer, "middleware error")
+	ErrMessage                            = fmt.Errorf("%w %s", ErrBroker, "message")
+	ErrMessageNotPublished                = fmt.Errorf("%w: %s", ErrMessage, "not a published message (outgoing)")
+	ErrMessageNotConsumed                 = fmt.Errorf("%w: %s", ErrMessage, "not a consumed message (incoming)")
 )
 
 // Error provides structured error information with context.
@@ -78,9 +83,16 @@ func (e *Error) Error() string {
 		return text
 	}
 
-	// helper for formatting a single child (special-case amqp.Error)
-	format := func(err error) string {
-		// if err == nil { return "<nil>" } // filtered earlier
+	// helper for formatting a wrapped errors
+	var format func(err error) string
+	format = func(err error) string {
+		// this case is already filtered out earlier
+		// it is added as a safeguard in case any custom error type
+		// implements interface { Unwrap() []error } and returns nil
+		if err == nil {
+			return "<nil>"
+		}
+		// if underlying is amqp.Error, format specially
 		if amqpErr, ok := err.(*amqp.Error); ok && amqpErr != nil {
 			source := "client"
 			if amqpErr.Server {
@@ -89,22 +101,21 @@ func (e *Error) Error() string {
 			return fmt.Sprintf("%s (source=%s, code=%d, recoverable=%v)",
 				amqpErr.Reason, source, amqpErr.Code, amqpErr.Recover)
 		}
+		// if underlying implements interface{ Unwrap() []error }
+		// (e.g. errors.Join result), format children compactly (no newlines)
+		if joinedErr, ok := err.(interface{ Unwrap() []error }); ok {
+			ancestors := joinedErr.Unwrap()
+			parts := make([]string, 0, len(ancestors))
+			for _, err := range ancestors {
+				parts = append(parts, format(err))
+			}
+			return strings.Join(parts, "; ")
+		}
 		// more cases as needed ...
 		return err.Error()
 	}
 
-	// if underlying implements Unwrap() []error (e.g. errors.Join result),
-	// format children compactly (no newlines)
-	if err, ok := e.Err.(interface{ Unwrap() []error }); ok {
-		ancestors := err.Unwrap()
-		parts := make([]string, 0, len(ancestors))
-		for _, err := range ancestors {
-			parts = append(parts, format(err))
-		}
-		return fmt.Sprintf("%s: %s", text, strings.Join(parts, "; "))
-	}
-
-	return fmt.Sprintf("%s: %v", text, format(e.Err))
+	return fmt.Sprintf("%s: %s", text, format(e.Err))
 }
 
 // Unwrap returns the underlying error (single unwrap).
