@@ -28,21 +28,22 @@ type Message struct {
 	/* metadata */
 	AppID      string // Application identifier
 	UserID     string // Validated user ID
-	Expiration string // Message TTL (milliseconds as string, e.g., "60000")
+	Expiration string // Message TTL (milliseconds as string, e.g. "60000")
 	Type       string // Application-specific message type
 
 	// holds metadata specific to internal implementation
-	*amqpMetadata
+	*metadata
 
 	// broker is a reference to a broker instance for usage inside handlers;
-	// it should be nil for outgoing messages.
+	// it should be nil for published messages (outgoing).
 	broker *Broker
 }
 
-// NewMessage creates a new message for publishing with sensible defaults.
+// NewMessage creates a new message for publishing with sensible defaults. These include:
+// ContentType="application/octet-stream", DeliveryMode=2 (persistent), and Timestamp=now.
 // Additional fields can be set directly on the returned Message.
-func NewMessage(body []byte) *Message {
-	return &Message{
+func NewMessage(body []byte) Message {
+	return Message{
 		Body:         body,
 		ContentType:  defaultContentType,
 		DeliveryMode: defaultDeliveryMode,
@@ -51,7 +52,7 @@ func NewMessage(body []byte) *Message {
 }
 
 // Broker returns the Broker associated with this message.
-// Available only for incoming messages; returns nil for outgoing messages.
+// Available only for consumed messages (incoming); returns nil for published messages (outgoing).
 func (m *Message) Broker() *Broker {
 	return m.broker
 }
@@ -60,7 +61,7 @@ func (m *Message) Broker() *Broker {
 // For "application/json", it returns a map[string]interface{}.
 // For "text/plain", it returns a string.
 // For any other ContentType, it returns the raw []byte body.
-// For other content types, it returns nil.
+// For other content types, it returns the raw body, which may be nil.
 func (m *Message) Data() any {
 	if m.Body == nil {
 		return nil
@@ -80,21 +81,6 @@ func (m *Message) Data() any {
 	}
 }
 
-// IsOutgoing returns true if this is a message to be published.
-func (m *Message) IsOutgoing() bool {
-	return m._delivery == nil
-}
-
-// IsReturned returns true if this message was returned by the broker.
-func (m *Message) IsReturned() bool {
-	return m._return != nil
-}
-
-// IsIncoming returns true if this is a consumed message.
-func (m *Message) IsIncoming() bool {
-	return m._delivery != nil
-}
-
 // Copy creates a deep copy of the message.
 // If the message has a Broker reference, it will be nil in the copy.
 func (m *Message) Copy() Message {
@@ -109,54 +95,109 @@ func (m *Message) Copy() Message {
 	return nm
 }
 
-// amqpMetadata contains metadata and methods specific to consumed messages.
+// metadata contains metadata and methods specific to consumed messages.
 // It should be nil for outgoing messages.
 // The fields are internal aliases to prevent exposing implementation details.
-type amqpMetadata struct {
+type metadata struct {
 	_delivery *amqp.Delivery
 	_return   *amqp.Return
 }
 
 // Ack acknowledges the message.
-func (am *amqpMetadata) Ack() error {
-	return am._delivery.Ack(false)
+//
+// Returns an error if the message ack fails or if the message is not a consumed message (incoming).
+//
+// Either [Message.Ack], [Message.Reject] or [Message.Nack] must be called for every message
+// that is not automatically acknowledged (via a consumer where AutoAck is enabled).
+func (m *metadata) Ack() error {
+	if !m.IsConsumed() {
+		return ErrMessageNotConsumed
+	}
+	return m._delivery.Ack(false)
 }
 
 // Nack negatively acknowledges the message.
-func (am *amqpMetadata) Nack(requeue bool) error {
-	return am._delivery.Nack(false, requeue)
-}
-
-// Reject rejects the message (same as Nack with requeue=false).
-func (am *amqpMetadata) Reject() error {
-	return am._delivery.Reject(false)
-}
-
-// IsRedelivered returns true if this message was redelivered.
-func (am *amqpMetadata) IsRedelivered() bool {
-	if am._delivery == nil {
-		return false
+// If requeue is true, the message will be requeued and delivered to another consumer.
+//
+// When requeue is true, request the server to deliver this message to a different consumer.
+// If it is not possible or requeue is false, the message will be dropped or delivered to
+// a server configured dead-letter queue.
+//
+// NOTE: This method must not be used to select or requeue messages the client wishes not to handle,
+// rather it is to inform the server that the client is incapable of handling this message at this time.
+//
+// Returns an error if the message nack fails or if the message is not a consumed message (incoming).
+//
+// Either [Message.Ack], [Message.Reject] or [Message.Nack] must be called for every message
+// that is not automatically acknowledged (via a consumer where AutoAck is enabled).
+func (m *metadata) Nack(requeue bool) error {
+	if !m.IsConsumed() {
+		return ErrMessageNotConsumed
 	}
-	return am._delivery.Redelivered
+	return m._delivery.Nack(false, requeue)
 }
 
-type amqpReturnDetails struct {
+// Reject rejects the message (same as [Message.Nack] with requeue=false, i.e. discard the message).
+//
+// If called and the server is unable to queue this message the message will be dropped or
+// delivered to a server configured dead-letter queue.
+//
+// Returns an error if the message reject fails or if the message is not a consumed message (incoming).
+//
+// Either [Message.Ack], [Message.Reject] or [Message.Nack] must be called for every message
+// that is not automatically acknowledged (via a consumer where AutoAck is enabled).
+func (m *metadata) Reject() error {
+	if !m.IsConsumed() {
+		return ErrMessageNotConsumed
+	}
+	return m._delivery.Reject(false)
+}
+
+// IsPublished returns true if this is a message to be published.
+func (m *metadata) IsPublished() bool {
+	return m != nil && m._delivery == nil
+}
+
+// IsConsumed returns true if this is a consumed message.
+func (m *metadata) IsConsumed() bool {
+	return m != nil && m._delivery != nil
+}
+
+// IsRedelivered returns true if this message was redelivered by the broker
+// (i.e. previously delivered but not acked).
+func (m *metadata) IsRedelivered() bool {
+	return m != nil && m._delivery != nil && m._delivery.Redelivered
+}
+
+// IsReturned returns true if this message was returned by the broker
+// (i.e. failed to be published).
+func (m *metadata) IsReturned() bool {
+	return m != nil && m._return != nil
+}
+
+// Return provides return details if the message was returned by the broker.
+// Returns nil if the message was not returned.
+func (m *metadata) ReturnDetails() *struct {
 	ReplyCode  uint16
 	ReplyText  string
 	Exchange   string
 	RoutingKey string
-}
-
-// Return provides return details if the message was returned by the broker.
-func (am *amqpMetadata) ReturnDetails() *amqpReturnDetails {
-	if am._return == nil {
+} {
+	if !m.IsReturned() {
 		return nil
 	}
-	return &amqpReturnDetails{
-		ReplyCode:  am._return.ReplyCode,
-		ReplyText:  am._return.ReplyText,
-		Exchange:   am._return.Exchange,
-		RoutingKey: am._return.RoutingKey,
+	// this struct is internal and is used only here;
+	// no need to predefine it elsewhere
+	return &struct {
+		ReplyCode  uint16
+		ReplyText  string
+		Exchange   string
+		RoutingKey string
+	}{
+		ReplyCode:  m._return.ReplyCode,
+		ReplyText:  m._return.ReplyText,
+		Exchange:   m._return.Exchange,
+		RoutingKey: m._return.RoutingKey,
 	}
 }
 
@@ -196,7 +237,7 @@ func amqpDeliveryToMessage(d *amqp.Delivery) Message {
 		Type:          d.Type,
 		UserID:        d.UserId,
 		AppID:         d.AppId,
-		amqpMetadata:  &amqpMetadata{_delivery: d},
+		metadata:      &metadata{_delivery: d},
 	}
 }
 
@@ -216,6 +257,6 @@ func amqpReturnToMessage(r *amqp.Return) Message {
 		Type:          r.Type,
 		UserID:        r.UserId,
 		AppID:         r.AppId,
-		amqpMetadata:  &amqpMetadata{_return: r},
+		metadata:      &metadata{_return: r},
 	}
 }
