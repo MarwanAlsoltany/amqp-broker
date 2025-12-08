@@ -9,8 +9,30 @@ import (
 	"time"
 )
 
-// Broker manages AMQP connections, publishers, and consumers with automatic
-// reconnection, connection management, and topology management.
+// Broker provides a high-level manager for AMQP connections, publishers, and consumers,
+// offering automatic reconnection, connection pooling, and declarative topology management.
+//
+// Ownership & Lifecycle:
+//   - Manages a pool of long-lived AMQP connections for publishers, consumers, and control operations.
+//   - Handles automatic reconnection and resource cleanup for all endpoints.
+//   - Maintains registries for managed publishers and consumers, and pools for one-off publishers.
+//
+// Topology Management:
+//   - Centralizes declaration, verification, deletion, and synchronization of exchanges, queues, and bindings.
+//   - Ensures topology is reapplied on reconnection and supports declarative state management.
+//
+// Concurrency & Safety:
+//   - All public methods are safe for concurrent use.
+//   - Internal registries and pools are protected by mutexes.
+//
+// Usage Patterns:
+//   - Use New(...) to construct a Broker with custom options (URL, connection pool size, endpoint defaults, etc ...).
+//   - Use [Broker.NewPublisher]/[Broker.NewConsumer] to create managed endpoints with automatic reconnection.
+//   - Use [Broker.Publish]/[Broker.Consume] for one-off publishing and consumption with automatic resource management.
+//   - Use [Broker.Declare], [Broker.Delete], [Broker.Verify], and [Broker.Sync] to manage AMQP topology declaratively.
+//   - Use [Broker.Close] to gracefully shut down the broker and all managed resources.
+//
+// See [BrokerOption] (With* functions) and [EndpointOptions] for configuration details.
 type Broker struct {
 	id  string
 	url string
@@ -23,31 +45,26 @@ type Broker struct {
 	closed atomic.Bool
 
 	// connection manager for all connections
-	connectionMgr      *connectionManager
-	connectionCfg      *Config
-	connectionPoolSize int
-	connectionEvents   struct {
-		onOpen  ConnectionOpenHandler
-		onClose ConnectionCloseHandler
-		onBlock ConnectionBlockHandler
-	}
-
-	// reconnection configuration
-	reconnectMin time.Duration
-	reconnectMax time.Duration
+	connectionMgr     *connectionManager
+	connectionMgrOpts connectionManagerOptions
 
 	// topology manager for declared exchanges, queues, and bindings
 	topologyMgr *topologyManager
 
+	// endpoint options defaults
+	endpointOpts EndpointOptions
+
 	// publisher registry for managed publishers
-	publishers   map[string]Publisher
-	publishersMu sync.Mutex
+	publishers    map[string]Publisher // map of publisher ID to Publisher
+	publishersMu  sync.Mutex // protects publishers map
+	publishersSeq atomic.Uint32 // publisher ID sequence
 	// cached publisher pool for one-off publishes
 	publishersPool *pool[Publisher]
 
 	// consumer registry for managed consumers
-	consumers   map[string]Consumer
-	consumersMu sync.Mutex
+	consumers    map[string]Consumer // map of consumer ID to Consumer
+	consumersMu  sync.Mutex // protects consumers map
+	consumersSeq atomic.Uint32 // consumer ID sequence
 	// unlike publisher, pooling is not needed for consumers
 	// as they are long-lived and get destroyed after use
 
@@ -106,26 +123,24 @@ func WithConnectionPoolSize(size int) BrokerOption {
 		if size <= 0 {
 			size = defaultConnectionPoolSize
 		}
-		b.connectionPoolSize = size
+		b.connectionMgrOpts.size = size
 	}
 }
 
-// WithReconnectConfig sets the minimum and maximum reconnection backoff.
-// Defaults to defaultReconnectMin (500ms) and defaultReconnectMax (30s).
-func WithReconnectConfig(min, max time.Duration) BrokerOption {
+// WithEndpointOptions sets the default EndpointOptions for all endpoints (publishers/consumers).
+func WithEndpointOptions(opts EndpointOptions) BrokerOption {
 	return func(b *Broker) {
-		b.reconnectMin = min
-		b.reconnectMax = max
+		b.endpointOpts = opts
 	}
 }
 
-// WithAMQPConfig sets the AMQP connection configuration.
+// WithDialConfig sets the AMQP connection configuration.
 // This allows full control over connection parameters including TLS, SASL,
 // heartbeat, channel limits, frame size, vhost, and properties.
 // Defaults to none.
-func WithAMQPConfig(config Config) BrokerOption {
+func WithDialConfig(config Config) BrokerOption {
 	return func(b *Broker) {
-		b.connectionCfg = &config
+		b.connectionMgrOpts.dialConfig = &config
 	}
 }
 
@@ -133,9 +148,9 @@ func WithAMQPConfig(config Config) BrokerOption {
 // The callback is invoked when a connection is successfully established or re-established.
 // Parameters: idx (which connection pool index)
 // Defaults to none.
-func WithConnectionOnOpen(handler ConnectionOpenHandler) BrokerOption {
+func WithConnectionOnOpen(handler ConnectionOnOpenHandler) BrokerOption {
 	return func(b *Broker) {
-		b.connectionEvents.onOpen = handler
+		b.connectionMgrOpts.onOpen = handler
 	}
 }
 
@@ -144,9 +159,9 @@ func WithConnectionOnOpen(handler ConnectionOpenHandler) BrokerOption {
 // Parameters: idx (connection pool index), code (AMQP error code), reason (error description),
 // server (true if initiated by server), recover (true if recoverable).
 // Defaults to none.
-func WithConnectionOnClose(handler ConnectionCloseHandler) BrokerOption {
+func WithConnectionOnClose(handler ConnectionOnCloseHandler) BrokerOption {
 	return func(b *Broker) {
-		b.connectionEvents.onClose = handler
+		b.connectionMgrOpts.onClose = handler
 	}
 }
 
@@ -155,9 +170,9 @@ func WithConnectionOnClose(handler ConnectionCloseHandler) BrokerOption {
 // Parameters: idx (connection pool index), active (true=blocked, false=unblocked),
 // reason (only set when active=true).
 // Defaults to none.
-func WithConnectionOnBlocked(handler ConnectionBlockHandler) BrokerOption {
+func WithConnectionOnBlocked(handler ConnectionOnBlockHandler) BrokerOption {
 	return func(b *Broker) {
-		b.connectionEvents.onBlock = handler
+		b.connectionMgrOpts.onBlock = handler
 	}
 }
 
@@ -167,48 +182,40 @@ func New(opts ...BrokerOption) (*Broker, error) {
 	ctx, cancel := context.WithCancel(context.Background()) // default
 
 	b := &Broker{
-		id:                 defaultBrokerID,
-		url:                defaultBrokerURL,
-		ctx:                ctx,
-		cancel:             cancel,
-		connectionPoolSize: defaultConnectionPoolSize,
-		publishers:         make(map[string]Publisher),
-		consumers:          make(map[string]Consumer),
-		reconnectMin:       defaultReconnectMin,
-		reconnectMax:       defaultReconnectMax,
-		cacheTTL:           defaultCacheTTL,
+		id:         defaultBrokerID,
+		url:        defaultBrokerURL,
+		ctx:        ctx,
+		cancel:     cancel,
+		publishers: make(map[string]Publisher),
+		consumers:  make(map[string]Consumer),
+		endpointOpts: EndpointOptions{
+			ReconnectMin: defaultReconnectMin,
+			ReconnectMax: defaultReconnectMax,
+			ReadyTimeout: defaultReadyTimeout,
+			// Add other sensible defaults as needed
+		},
+		cacheTTL: defaultCacheTTL,
 	}
 
 	for _, opt := range opts {
 		opt(b)
 	}
 
-	if b.reconnectMin <= 0 {
+	if b.endpointOpts.ReconnectMin <= 0 {
 		return nil, fmt.Errorf("%w: min must be positive", ErrBrokerConfigInvalid)
 	}
-	if b.reconnectMax <= b.reconnectMin {
+	if b.endpointOpts.ReconnectMax <= b.endpointOpts.ReconnectMin {
 		return nil, fmt.Errorf("%w: max must be greater than min", ErrBrokerConfigInvalid)
 	}
 
-	b.connectionMgr = newConnectionManager(b.url, b.connectionCfg, b.connectionPoolSize)
-
-	// set event handlers on connection manager
-	if b.connectionEvents.onOpen != nil {
-		b.connectionMgr.onOpen(b.connectionEvents.onOpen)
-	}
-	if b.connectionEvents.onClose != nil {
-		b.connectionMgr.onClose(b.connectionEvents.onClose)
-	}
-	if b.connectionEvents.onBlock != nil {
-		b.connectionMgr.onBlock(b.connectionEvents.onBlock)
-	}
-
+	b.connectionMgr = newConnectionManager(b.url, &b.connectionMgrOpts)
 	// initialize all managed connections
 	if err := b.connectionMgr.init(b.ctx); err != nil {
 		return nil, err
 	}
 
-	b.topologyMgr = newTopologyManager() // initialize singleton topology manager
+	// initialize singleton topology manager
+	b.topologyMgr = newTopologyManager()
 
 	if b.cacheTTL > 0 {
 		b.publishersPool = newPool[Publisher](b.cacheTTL)
@@ -221,7 +228,10 @@ func New(opts ...BrokerOption) (*Broker, error) {
 	return b, nil
 }
 
-// Connection returns the control connection for topology operations.
+// Connection returns the control connection for topology operations (exchanges, queues, bindings).
+//
+// The returned connection is managed by the Broker and should not be closed by the caller.
+// Returns an error if no connection is available or the broker is closed.
 func (b *Broker) Connection() (*Connection, error) {
 	conn, err := b.connectionMgr.assign(roleController)
 	if err != nil {
@@ -231,9 +241,10 @@ func (b *Broker) Connection() (*Connection, error) {
 	return conn, nil
 }
 
-// Channel returns the control channel for topology operations.
+// Channel returns a new control channel for topology operations (exchanges, queues, bindings).
 //
-// NOTE: A Channel returned by this method should be closed by the caller.
+// The caller is responsible for closing the returned channel when done.
+// Returns an error if the control connection is unavailable or the broker is closed.
 func (b *Broker) Channel() (*Channel, error) {
 	conn, err := b.Connection()
 	if err != nil {
@@ -248,7 +259,11 @@ func (b *Broker) Channel() (*Channel, error) {
 	return ch, nil
 }
 
-// Close shuts down the broker and all managed endpoints.
+// Close gracefully shuts down the broker and all managed resources.
+//
+// This closes all managed publishers, consumers, pooled endpoints, and connections.
+// It is safe to call multiple times; subsequent calls are no-ops.
+// Returns a combined error if any resources fail to close.
 func (b *Broker) Close() error {
 	if !b.closed.CompareAndSwap(false, true) {
 		return nil
@@ -293,43 +308,49 @@ func (b *Broker) Close() error {
 		}
 	}
 
-	if len(errs) > 0 {
-		return fmt.Errorf("%w: %w", ErrBrokerClose, errors.Join(errs...))
+	if err := errors.Join(errs...); err != nil {
+		return fmt.Errorf("%w: %w", ErrBrokerClose, err)
 	}
 
 	return nil
 }
 
-// Declare applies the given topology to the broker (exchanges, queues, and bindings).
-// The topology is merged with existing topology and will be reapplied on reconnection.
+// Declare applies the given topology (exchanges, queues, bindings) to the broker.
+//
+// The topology is merged with the broker's existing topology and will be reapplied on reconnection.
+// Returns an error if declaration fails.
 func (b *Broker) Declare(t *Topology) error {
 	ch, err := b.Channel()
 	if err != nil {
-		return wrapError("get control channel", err)
+		return err
 	}
 	defer ch.Close()
 
 	return b.topologyMgr.declare(ch, t)
 }
 
-// Delete removes the given topology from the broker (exchanges, queues, and bindings).
+// Delete removes the given topology (exchanges, queues, bindings) from the broker.
+//
 // Bindings are removed first, then queues, then exchanges (reverse order of declaration).
+// Returns an error if deletion fails.
 func (b *Broker) Delete(t *Topology) error {
 	ch, err := b.Channel()
 	if err != nil {
-		return wrapError("get control channel", err)
+		return err
 	}
 	defer ch.Close()
 
 	return b.topologyMgr.delete(ch, t)
 }
 
-// Verify checks that the given topology exists with correct configuration.
+// Verify checks that the given topology exists on the broker with the correct configuration.
+//
 // For exchanges and queues, uses passive declarations. For bindings, redeclares them (idempotent).
+// Returns an error if verification fails.
 func (b *Broker) Verify(t *Topology) error {
 	ch, err := b.Channel()
 	if err != nil {
-		return wrapError("get control channel", err)
+		return err
 	}
 	defer ch.Close()
 
@@ -337,23 +358,26 @@ func (b *Broker) Verify(t *Topology) error {
 }
 
 // Sync synchronizes the broker's topology to match the desired state exactly.
-// It deletes entities that exist but are not in the desired topology,
-// then declares entities from the desired topology.
-// This provides declarative topology management - specify desired state and Sync makes it so.
-// Note that sync is aware of the topology declared on this Broker, it does not inspect the server directly.
+//
+// Entities not present in the desired topology are deleted; missing entities are declared.
+// This provides declarative topology management, specify the desired state and Sync enforces it.
+// Note: Sync is aware only of topology declared on this Broker, not the server's full state.
+// Returns an error if synchronization fails.
 func (b *Broker) Sync(t *Topology) error {
 	ch, err := b.Channel()
 	if err != nil {
-		return wrapError("get control channel", err)
+		return err
 	}
 	defer ch.Close()
 
 	return b.topologyMgr.sync(ch, t)
 }
 
-// NewPublisher creates a managed Publisher that owns a dedicated connection.
+// NewPublisher creates a managed Publisher with a dedicated connection and lifecycle.
+//
 // The publisher will automatically reconnect on connection failure.
-// Options control confirmation mode and retry behavior.
+// Options control confirmation mode, retry behavior, and endpoint configuration.
+// Returns the Publisher or an error if creation fails.
 func (b *Broker) NewPublisher(opts *PublisherOptions, e Exchange) (Publisher, error) {
 	if b.closed.Load() {
 		return nil, ErrBrokerClosed
@@ -361,8 +385,9 @@ func (b *Broker) NewPublisher(opts *PublisherOptions, e Exchange) (Publisher, er
 
 	po := defaultPublisherOptions()
 	if opts != nil {
-		po = *opts
+		po = mergePublisherOptions(*opts, po)
 	}
+	po.EndpointOptions = mergeEndpointOptions(po.EndpointOptions, b.endpointOpts)
 
 	// load last declared exchange by name from topology
 	// this allows users to pass minimal exchange info
@@ -370,38 +395,26 @@ func (b *Broker) NewPublisher(opts *PublisherOptions, e Exchange) (Publisher, er
 		e = *te
 	}
 
+	id := fmt.Sprintf("publisher-%d@%s", b.publishersSeq.Add(1), b.id)
+	p := newPublisher(id, b, po, e)
+
+	if err := p.init(b.ctx); err != nil {
+		p.Close() // cleanup
+		return nil, err
+	}
+
 	b.publishersMu.Lock()
-	id := fmt.Sprintf("publisher-%d@%s", len(b.publishers)+1, b.id)
-	p := newPublisher(b, id, po, e)
 	b.publishers[id] = p
 	b.publishersMu.Unlock()
-
-	go p.run() // start publisher goroutine
-
-	// wait for initial connection
-	if !po.NoWaitForReady {
-		timeout := po.ReadyTimeout
-		if timeout <= 0 {
-			timeout = defaultReadyTimeout
-		}
-
-		ctx, cancel := context.WithTimeout(b.ctx, timeout)
-		defer cancel()
-		if !p.waitReady(ctx) {
-			p.Close()
-			b.publishersMu.Lock()
-			delete(b.publishers, id)
-			b.publishersMu.Unlock()
-			return nil, ErrNotReadyTimeout
-		}
-	}
 
 	return p, nil
 }
 
-// NewConsumer creates a managed Consumer that owns a dedicated connection.
+// NewConsumer creates a managed Consumer with a dedicated connection and lifecycle.
+//
 // The consumer will automatically reconnect on connection failure.
-// Options control prefetch settings and ready wait behavior.
+// Options control prefetch settings, handler concurrency, and endpoint configuration.
+// Returns the Consumer or an error if creation fails.
 func (b *Broker) NewConsumer(opts *ConsumerOptions, q Queue, h Handler) (Consumer, error) {
 	if b.closed.Load() {
 		return nil, ErrBrokerClosed
@@ -409,8 +422,9 @@ func (b *Broker) NewConsumer(opts *ConsumerOptions, q Queue, h Handler) (Consume
 
 	co := defaultConsumerOptions()
 	if opts != nil {
-		co = *opts
+		co = mergeConsumerOptions(*opts, co)
 	}
+	co.EndpointOptions = mergeEndpointOptions(co.EndpointOptions, b.endpointOpts)
 
 	// load last declared queue by name from topology
 	// this allows users to pass minimal queue info
@@ -418,37 +432,25 @@ func (b *Broker) NewConsumer(opts *ConsumerOptions, q Queue, h Handler) (Consume
 		q = *tq
 	}
 
+	id := fmt.Sprintf("consumer-%d@%s", b.consumersSeq.Add(1), b.id)
+	c := newConsumer(id, b, co, q, h)
+
+	if err := c.init(b.ctx); err != nil {
+		c.Close() // cleanup
+		return nil, err
+	}
+
 	b.consumersMu.Lock()
-	id := fmt.Sprintf("consumer-%d@%s", len(b.consumers)+1, b.id)
-	c := newConsumer(b, id, co, q, h)
 	b.consumers[id] = c
 	b.consumersMu.Unlock()
-
-	go c.run() // start consumer goroutine
-
-	// wait for initial connection
-	if !co.NoWaitForReady {
-		timeout := co.ReadyTimeout
-		if timeout <= 0 {
-			timeout = defaultReadyTimeout
-		}
-
-		ctx, cancel := context.WithTimeout(b.ctx, timeout)
-		defer cancel()
-		if !c.waitReady(ctx) {
-			c.Close()
-			b.consumersMu.Lock()
-			delete(b.consumers, id)
-			b.consumersMu.Unlock()
-			return nil, ErrNotReadyTimeout
-		}
-	}
 
 	return c, nil
 }
 
-// Publish performs a one-off publish using a cached publisher when caching is enabled.
-// For high-throughput scenarios with confirmations, prefer NewPublisher.
+// Publish performs a one-off publish using a cached publisher if pooling is enabled.
+//
+// For high-throughput or confirmation scenarios, prefer using a managed Publisher.
+// Returns an error if publishing fails.
 func (b *Broker) Publish(ctx context.Context, exchange, routingKey string, msg ...Message) error {
 	if b.closed.Load() {
 		return ErrBrokerClosed
@@ -491,8 +493,10 @@ func (b *Broker) Publish(ctx context.Context, exchange, routingKey string, msg .
 	return p.Publish(ctx, rk, msg...)
 }
 
-// Consume is a convenience method that creates and starts a consumer.
+// Consume is a convenience method that creates and starts a one-off consumer.
+//
 // The consumer is closed automatically when the context is cancelled.
+// Returns an error if consumption fails.
 func (b *Broker) Consume(ctx context.Context, queue string, handler Handler) error {
 	if b.closed.Load() {
 		return ErrBrokerClosed
@@ -520,11 +524,11 @@ func (b *Broker) Consume(ctx context.Context, queue string, handler Handler) err
 	return c.Consume(ctx)
 }
 
-// Transaction executes fn within an AMQP transaction.
-// The transaction commits if fn returns nil, otherwise rolls back.
+// Transaction executes fn within an AMQP transaction on a control channel.
 //
-// Deprecated: Do not use, transactions are SLOW (~2x overhead) in AMQP. Use publisher confirms instead.
-// This function exists for the sake of completeness.
+// The transaction commits if fn returns nil, otherwise rolls back.
+// Deprecated: Transactions in AMQP are SLOW (~2x overhead); use publisher confirms instead.
+// Returns an error if the transaction fails or rollback is required.
 func (b *Broker) Transaction(ctx context.Context, fn func(*Channel) error) error {
 	ch, err := b.Channel()
 	if err != nil {

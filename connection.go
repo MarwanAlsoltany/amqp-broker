@@ -12,19 +12,19 @@ import (
 
 // Handler types for connection events
 type (
-	// ConnectionOpenHandler is called when a connection is established or re-established.
+	// ConnectionOnOpenHandler is called when a connection is established or re-established.
 	// Parameters: idx (connection pool index)
-	ConnectionOpenHandler func(idx int)
+	ConnectionOnOpenHandler func(idx int)
 
-	// ConnectionCloseHandler is called when a connection closes.
+	// ConnectionOnCloseHandler is called when a connection closes.
 	// Parameters: idx (connection pool index), code (AMQP error code), reason (error description),
 	// server (true if initiated by server), recover (true if recoverable)
-	ConnectionCloseHandler func(idx int, code int, reason string, server bool, recover bool)
+	ConnectionOnCloseHandler func(idx int, code int, reason string, server bool, recover bool)
 
-	// ConnectionBlockHandler is called when connection flow control changes.
+	// ConnectionOnBlockHandler is called when connection flow control changes.
 	// Parameters: idx (connection pool index), active (true=blocked, false=unblocked),
 	// reason (blocking reason, only set when active=true)
-	ConnectionBlockHandler func(idx int, active bool, reason string)
+	ConnectionOnBlockHandler func(idx int, active bool, reason string)
 )
 
 // newConnection establishes a new AMQP connection using the provided config.
@@ -48,11 +48,10 @@ func newConnection(url string, config *Config) (*Connection, error) {
 // Connections are assigned to endpoints based on their role and held for their lifetime.
 type connectionManager struct {
 	url  string
-	size int
-	cfg  *Config
+	opts connectionManagerOptions
 
-	pool []*Connection
-	mu   sync.RWMutex
+	pool   []*Connection
+	poolMu sync.RWMutex
 
 	// round-robin counters for assignment within role groups
 	publishersCount atomic.Uint32
@@ -63,71 +62,32 @@ type connectionManager struct {
 	cancel context.CancelFunc
 	// closed state
 	closed atomic.Bool
+}
 
-	// event handlers
-	openHandler  ConnectionOpenHandler
-	closeHandler ConnectionCloseHandler
-	blockHandler ConnectionBlockHandler
-	handlersMu   sync.RWMutex
+type connectionManagerOptions struct {
+	size       int
+	dialConfig *Config
+	onOpen     ConnectionOnOpenHandler
+	onClose    ConnectionOnCloseHandler
+	onBlock    ConnectionOnBlockHandler
 }
 
 // newConnectionManager creates a new connection manager with the specified size.
 // Size determines how many long-lived connections are maintained.
-func newConnectionManager(url string, cfg *Config, size int) *connectionManager {
-	if size <= 0 {
-		size = defaultConnectionPoolSize
-	}
-	return &connectionManager{
-		url:  url,
-		cfg:  cfg,
-		size: size,
-		pool: make([]*Connection, size),
-	}
-}
+func newConnectionManager(url string, opts *connectionManagerOptions) *connectionManager {
+	cn := &connectionManager{url: url}
 
-// onOpen sets the callback for connection open events.
-// Handlers added later are chained after earlier ones.
-// An added handler cannot be removed.
-func (cm *connectionManager) onOpen(handler ConnectionOpenHandler) {
-	cm.handlersMu.Lock()
-	oldHandler := cm.openHandler
-	cm.openHandler = func(idx int) {
-		if oldHandler != nil {
-			oldHandler(idx)
-		}
-		handler(idx)
+	if opts != nil {
+		cn.opts = *opts
 	}
-	cm.handlersMu.Unlock()
-}
 
-// onClose sets the callback for connection close events.
-// Handlers added later are chained after earlier ones.
-// An added handler cannot be removed.
-func (cm *connectionManager) onClose(handler ConnectionCloseHandler) {
-	cm.handlersMu.Lock()
-	oldHandler := cm.closeHandler
-	cm.closeHandler = func(idx int, code int, reason string, server bool, recover bool) {
-		if oldHandler != nil {
-			oldHandler(idx, code, reason, server, recover)
-		}
-		handler(idx, code, reason, server, recover)
+	if cn.opts.size <= 0 {
+		cn.opts.size = defaultConnectionPoolSize
 	}
-	cm.handlersMu.Unlock()
-}
 
-// onBlock sets the callback for connection blocked/unblocked events.
-// Handlers added later are chained after earlier ones.
-// An added handler cannot be removed.
-func (cm *connectionManager) onBlock(handler ConnectionBlockHandler) {
-	cm.handlersMu.Lock()
-	oldHandler := cm.blockHandler
-	cm.blockHandler = func(idx int, active bool, reason string) {
-		if oldHandler != nil {
-			oldHandler(idx, active, reason)
-		}
-		handler(idx, active, reason)
-	}
-	cm.handlersMu.Unlock()
+	cn.pool = make([]*Connection, cn.opts.size)
+
+	return cn
 }
 
 // init creates all managed connections.
@@ -139,14 +99,14 @@ func (cm *connectionManager) init(ctx context.Context) error {
 	default:
 	}
 
-	cm.mu.Lock()
-	defer cm.mu.Unlock()
+	cm.poolMu.Lock()
+	defer cm.poolMu.Unlock()
 
 	// set up context for monitoring goroutines
 	cm.ctx, cm.cancel = context.WithCancel(ctx)
 
-	for i := 0; i < cm.size; i++ {
-		conn, err := newConnection(cm.url, cm.cfg)
+	for i := 0; i < len(cm.pool); i++ {
+		conn, err := newConnection(cm.url, cm.opts.dialConfig)
 		if err != nil {
 			// close any connections already opened
 			for j := 0; j < i; j++ {
@@ -154,7 +114,7 @@ func (cm *connectionManager) init(ctx context.Context) error {
 					_ = cm.pool[j].Close()
 				}
 			}
-			return wrapError(fmt.Sprintf("init connection %d", i+1), err)
+			return fmt.Errorf("%w: init connection %d: %w", ErrConnectionManager, i+1, err)
 		}
 
 		cm.pool[i] = conn
@@ -171,15 +131,15 @@ func (cm *connectionManager) replace(idx int) error {
 		return ErrConnectionManagerClosed
 	}
 
-	cm.mu.Lock()
-	defer cm.mu.Unlock()
+	cm.poolMu.Lock()
+	defer cm.poolMu.Unlock()
 
 	if idx < 0 || idx >= len(cm.pool) {
 		return fmt.Errorf("%w: invalid connection index: %d", ErrConnectionNotAvailable, idx)
 	}
 
 	// create new connection
-	conn, err := newConnection(cm.url, cm.cfg)
+	conn, err := newConnection(cm.url, cm.opts.dialConfig)
 	if err != nil {
 		// m.pool[idx] = nil
 		return fmt.Errorf("%w: replace connection %d: %w", ErrConnectionManagerReplace, idx, err)
@@ -209,17 +169,14 @@ func (cm *connectionManager) monitor(conn *Connection) {
 	}
 
 	isStale := func(conn *Connection) bool {
-		cm.mu.RLock()
-		defer cm.mu.RUnlock()
+		cm.poolMu.RLock()
+		defer cm.poolMu.RUnlock()
 		return conn != cm.pool[idx]
 	}
 
 	// call open handler if registered
-	cm.handlersMu.RLock()
-	openHandler := cm.openHandler
-	cm.handlersMu.RUnlock()
-	if openHandler != nil {
-		go openHandler(idx)
+	if cm.opts.onOpen != nil {
+		go cm.opts.onOpen(idx)
 	}
 
 	// create a buffered channel to avoid deadlock
@@ -232,23 +189,20 @@ func (cm *connectionManager) monitor(conn *Connection) {
 		case <-cm.ctx.Done():
 			return
 		case err, ok := <-closeCh:
-			if !ok {
-				return
-			}
-
-			// ignore: stale event for a replaced connection
-			if isStale(conn) {
-				return
-			}
-
-			// call close handler if registered
-			if err != nil {
-				cm.handlersMu.RLock()
-				handler := cm.closeHandler
-				cm.handlersMu.RUnlock()
-				if handler != nil {
-					go handler(idx, err.Code, err.Reason, err.Server, err.Recover) // prevent blocking
+			// channel closed without error: graceful shutdown
+			if graceful := !ok && err == nil; graceful {
+				err = &amqp.Error{
+					Reason:  "graceful shutdown",
+					Recover: true,
 				}
+			}
+
+			if isStale(conn) {
+				return // ignore: stale event for a replaced connection
+			}
+
+			if err != nil && cm.opts.onClose != nil {
+				go cm.opts.onClose(idx, err.Code, err.Reason, err.Server, err.Recover) // prevent blocking
 			}
 
 			// connection closed, attempt to replace it if manager is still open
@@ -258,23 +212,15 @@ func (cm *connectionManager) monitor(conn *Connection) {
 			}
 
 			return
-		case block, ok := <-blockCh:
+		case block := <-blockCh:
 			// due to the nature of how blocking happens in RabbitMQ,
-			// there is no way to test this code path reliably in tests
-			if !ok {
-				return
-			}
-
-			// ignore: stale event for a blocked connection
+			// there is no reliable way to test this code path
 			if isStale(conn) {
-				return
+				return // ignore: stale event for a blocked connection
 			}
 
-			cm.handlersMu.RLock()
-			handler := cm.blockHandler
-			cm.handlersMu.RUnlock()
-			if handler != nil {
-				go handler(idx, block.Active, block.Reason) // prevent blocking
+			if cm.opts.onBlock != nil {
+				go cm.opts.onBlock(idx, block.Active, block.Reason) // prevent blocking
 			}
 		}
 	}
@@ -286,8 +232,8 @@ func (cm *connectionManager) index(conn *Connection) int {
 		return -1
 	}
 
-	cm.mu.RLock()
-	defer cm.mu.RUnlock()
+	cm.poolMu.RLock()
+	defer cm.poolMu.RUnlock()
 
 	for i, c := range cm.pool {
 		if c == conn {
@@ -312,10 +258,10 @@ func (cm *connectionManager) index(conn *Connection) int {
 //
 // Examples
 //   - N=2: controller=0, publisher=1, consumer=1
-//   - N=4: controller=0, publisher=1, consumer=2, round robin=3
-//   - N=8: controller=0, publisher=1, consumer=2, round robin=3-7
-//   - N=10: controller=0, publishers=1-2, consumers=3-4, round robin=5-9
-//   - N=16: controller=0, publishers=1-3, consumers=4-6, round robin=7-15
+//   - N=4: controller=0, publisher=1, consumer=2, round-robin=3
+//   - N=8: controller=0, publisher=1, consumer=2, round-robin=3-7
+//   - N=10: controller=0, publishers=1-2, consumers=3-4, round-robin=5-9
+//   - N=16: controller=0, publishers=1-3, consumers=4-6, round-robin=7-15
 //
 // This strategy ensures isolation for controller, dedicated connections for
 // publishers and consumers, and efficient utilization of extra connections for high concurrency.
@@ -324,8 +270,8 @@ func (cm *connectionManager) assign(role endpointRole) (*Connection, error) {
 		return nil, ErrConnectionManagerClosed
 	}
 
-	cm.mu.RLock()
-	defer cm.mu.RUnlock()
+	cm.poolMu.RLock()
+	defer cm.poolMu.RUnlock()
 
 	var idx int
 	var size = len(cm.pool)
@@ -413,8 +359,8 @@ func (cm *connectionManager) Close() error {
 		cm.cancel()
 	}
 
-	cm.mu.Lock()
-	defer cm.mu.Unlock()
+	cm.poolMu.Lock()
+	defer cm.poolMu.Unlock()
 
 	var errs []error
 	for i, conn := range cm.pool {
@@ -426,8 +372,8 @@ func (cm *connectionManager) Close() error {
 		}
 	}
 
-	if len(errs) > 0 {
-		return fmt.Errorf("%w: %w", ErrConnectionManagerClose, errors.Join(errs...))
+	if err := errors.Join(errs...); err != nil {
+		return fmt.Errorf("%w: %w", ErrConnectionManagerClose, err)
 	}
 
 	return nil
@@ -453,7 +399,8 @@ func doSafeChannelAction(ch *Channel, op func(*Channel) error) error {
 	return err
 }
 
-// doSafeChannelActionWithReturn is similar to [doSafeChannelAction] but supports operations that return a value. It is generic and can handle operations that return any type along with an error.
+// doSafeChannelActionWithReturn is similar to [doSafeChannelAction] but supports operations that return a value.
+// It is generic and can handle operations that return any type along with an error.
 //
 // Usage examples:
 //
@@ -468,6 +415,10 @@ func doSafeChannelAction(ch *Channel, op func(*Channel) error) error {
 func doSafeChannelActionWithReturn[T any](ch *Channel, op func(*Channel) (T, error)) (T, error) {
 	var zero T
 
+	if ch == nil {
+		return zero, ErrChannelNotAvailable
+	}
+
 	// create a buffered channel to avoid deadlock
 	// library sends notification once, then closes the channel
 	closeCh := ch.NotifyClose(make(chan *amqp.Error, 1))
@@ -481,8 +432,8 @@ func doSafeChannelActionWithReturn[T any](ch *Channel, op func(*Channel) (T, err
 
 	// execute the operation in a goroutine
 	go func() {
-		val, err := op(ch)
-		resultCh <- result{value: val, err: err}
+		value, err := op(ch)
+		resultCh <- result{value, err}
 	}()
 
 	// wait for either operation completion or channel closure
