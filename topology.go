@@ -9,7 +9,7 @@ import (
 )
 
 // topologyManager manages topology state with internal synchronization.
-// It wraps a Topology and provides thread-safe operations.
+// It wraps declaration, deletion, verification, and mutex for thread-safety usage.
 type topologyManager struct {
 	exchanges []Exchange
 	queues    []Queue
@@ -19,7 +19,7 @@ type topologyManager struct {
 	declarations sync.Map // map[string]struct{}
 
 	// synchronization mutex for internal state
-	mu sync.RWMutex
+	stateMu sync.RWMutex
 }
 
 // newTopologyManager creates a new topology manager.
@@ -33,8 +33,8 @@ func newTopologyManager() *topologyManager {
 
 // exchange returns a copy of the exchange with the given name, or nil if not found.
 func (tm *topologyManager) exchange(name string) *Exchange {
-	tm.mu.RLock()
-	defer tm.mu.RUnlock()
+	tm.stateMu.RLock()
+	defer tm.stateMu.RUnlock()
 
 	if idx := slices.IndexFunc(tm.exchanges, func(e Exchange) bool { return e.Name == name }); idx >= 0 {
 		exCopy := tm.exchanges[idx]
@@ -45,8 +45,8 @@ func (tm *topologyManager) exchange(name string) *Exchange {
 
 // queue returns a copy of the queue with the given name, or nil if not found.
 func (tm *topologyManager) queue(name string) *Queue {
-	tm.mu.RLock()
-	defer tm.mu.RUnlock()
+	tm.stateMu.RLock()
+	defer tm.stateMu.RUnlock()
 
 	if idx := slices.IndexFunc(tm.queues, func(q Queue) bool { return q.Name == name }); idx >= 0 {
 		qCopy := tm.queues[idx]
@@ -57,8 +57,8 @@ func (tm *topologyManager) queue(name string) *Queue {
 
 // binding returns a copy of the binding with the given source, destination, and key, or nil if not found.
 func (tm *topologyManager) binding(source, destination, key string) *Binding {
-	tm.mu.RLock()
-	defer tm.mu.RUnlock()
+	tm.stateMu.RLock()
+	defer tm.stateMu.RUnlock()
 
 	if idx := slices.IndexFunc(tm.bindings, func(b Binding) bool {
 		return b.Source == source && b.Destination == destination && b.Key == key
@@ -70,12 +70,12 @@ func (tm *topologyManager) binding(source, destination, key string) *Binding {
 }
 
 // declare declares topology on channel and merges it into the manager atomically.
-// Uses the declaration cache to prevent re-declarations.
+// It makes use of the declarations cache to prevent unnecessary re-declarations.
 // For exchanges and queues, if an entity with the same name exists, it's replaced.
-// For bindings, if a binding with the same source+destination+ exists, it's replaced.
+// For bindings, if a binding with the same source+destination+key exists, it's replaced.
 func (tm *topologyManager) declare(ch *Channel, t *Topology) error {
-	tm.mu.Lock()
-	defer tm.mu.Unlock()
+	tm.stateMu.Lock()
+	defer tm.stateMu.Unlock()
 
 	for _, e := range t.Exchanges {
 		if err := e.Validate(); err != nil {
@@ -147,8 +147,8 @@ func (tm *topologyManager) declare(ch *Channel, t *Topology) error {
 // Bindings are removed first, then queues, then exchanges (reverse order of declaration).
 // Entities are removed from internal state and cleared from the declaration cache.
 func (tm *topologyManager) delete(ch *Channel, t *Topology) error {
-	tm.mu.Lock()
-	defer tm.mu.Unlock()
+	tm.stateMu.Lock()
+	defer tm.stateMu.Unlock()
 
 	for _, b := range t.Bindings {
 		if err := b.Validate(); err != nil {
@@ -193,12 +193,12 @@ func (tm *topologyManager) delete(ch *Channel, t *Topology) error {
 }
 
 // verify verifies that topology exists on the channel with correct configuration.
-// For exchanges, redeclares them (idempotent) to ensure type/args match.
-// For queues, uses passive declaration to check existence.
-// Note: AMQP doesn't provide a way to verify bindings - they're verified through routing.
+// For exchanges and queues, uses passive declaration to ensure type/args match.
+// Note: AMQP doesn't provide a way to verify bindings, they're verified through routing.
+// A verify for bindings will simply re-declare them idempotently.
 func (tm *topologyManager) verify(ch *Channel, t *Topology) error {
-	tm.mu.RLock()
-	defer tm.mu.RUnlock()
+	tm.stateMu.RLock()
+	defer tm.stateMu.RUnlock()
 
 	for _, e := range t.Exchanges {
 		if err := e.Validate(); err != nil {
@@ -231,15 +231,15 @@ func (tm *topologyManager) verify(ch *Channel, t *Topology) error {
 	return nil
 }
 
-// sync synchronizes the desired topology with the actual AMQP state.
+// sync synchronizes the desired topology with the actual topology state.
 // It deletes entities that exist in the manager but not in the desired topology,
 // then declares entities from the desired topology.
-// This provides declarative topology management - specify desired state and sync makes it so.
-// Note that sync is aware of the topology declared on this Broker, it does not inspect the server directly.
+// This provides declarative topology management, specify desired state and sync makes it so.
+// Note: sync is aware of the topology declared on this instance, it does not inspect the server directly.
 func (tm *topologyManager) sync(ch *Channel, t *Topology) error {
 	diff := &Topology{}
 
-	tm.mu.RLock()
+	tm.stateMu.RLock()
 
 	for _, b := range tm.bindings {
 		if slices.IndexFunc(t.Bindings, func(db Binding) bool { return b.Matches(db) }) < 0 {
@@ -259,7 +259,7 @@ func (tm *topologyManager) sync(ch *Channel, t *Topology) error {
 		}
 	}
 
-	tm.mu.RUnlock()
+	tm.stateMu.RUnlock()
 
 	// delete entities not in desired topology (delete() acquires its own lock)
 	if !diff.Empty() {
@@ -311,10 +311,10 @@ func (t *Topology) Delete(ch *Channel) error {
 
 // Exchange returns a copy of the exchange with the given name, or nil if not found.
 func (t *Topology) Exchange(name string) *Exchange {
-	for i := range t.Exchanges {
-		e := t.Exchanges[i]
+	for _, e := range t.Exchanges {
 		if e.Name == name {
-			return &e
+			eCopy := e
+			return &eCopy
 		}
 	}
 	return nil
@@ -322,10 +322,10 @@ func (t *Topology) Exchange(name string) *Exchange {
 
 // Queue returns a copy of the queue with the given name, or nil if not found.
 func (t *Topology) Queue(name string) *Queue {
-	for i := range t.Queues {
-		q := t.Queues[i]
+	for _, q := range t.Queues {
 		if q.Name == name {
-			return &q
+			qCopy := q
+			return &qCopy
 		}
 	}
 	return nil
@@ -333,10 +333,10 @@ func (t *Topology) Queue(name string) *Queue {
 
 // Binding returns a copy of the binding with the given source, destination, and key, or nil if not found.
 func (t *Topology) Binding(source, destination, key string) *Binding {
-	for i := range t.Bindings {
-		b := t.Bindings[i]
+	for _, b := range t.Bindings {
 		if b.Source == source && b.Destination == destination && b.Key == key {
-			return &b
+			bCopy := b
+			return &bCopy
 		}
 	}
 	return nil
@@ -347,7 +347,7 @@ func (t *Topology) Empty() bool {
 	return len(t.Exchanges) == 0 && len(t.Queues) == 0 && len(t.Bindings) == 0
 }
 
-// Merge creates a new Topology with all elements from both topologies.
+// Merge creates a new Topology with all elements from both topologies (deep merge).
 func (t *Topology) Merge(other *Topology) *Topology {
 	merged := &Topology{}
 
@@ -399,9 +399,11 @@ func (t *Topology) Merge(other *Topology) *Topology {
 	return merged
 }
 
-// Validate returns an error if the topology is invalid.
+// Validate returns an error if the topology is invalid by validating all entities.
+// The returned error will aggregate all validation errors found (joint error).
 func (t *Topology) Validate() error {
 	var errs []error
+
 	for _, e := range t.Exchanges {
 		if err := e.Validate(); err != nil {
 			errs = append(errs, err)
@@ -418,8 +420,8 @@ func (t *Topology) Validate() error {
 		}
 	}
 
-	if len(errs) > 0 {
-		return fmt.Errorf("%w: %w", ErrTopologyValidation, errors.Join(errs...))
+	if err := errors.Join(errs...); err != nil {
+		return fmt.Errorf("%w: %w", ErrTopologyValidation, err)
 	}
 
 	return nil
@@ -441,7 +443,7 @@ type Exchange struct {
 	Arguments Arguments
 }
 
-// NewExchange creates a new Exchange with sensible defaults.
+// NewExchange creates a new Exchange with sensible defaults (Type="direct", Durable=true).
 func NewExchange(name string) Exchange {
 	return Exchange{
 		Name:       name,
@@ -467,7 +469,7 @@ func (e Exchange) Validate() error {
 }
 
 // Declare declares this exchange using the provided channel.
-// If the operation causes a channel-level error (e.g., precondition failed),
+// If the operation causes a channel-level error (e.g. precondition failed),
 // the error will include information about the channel closure reason.
 func (e Exchange) Declare(ch *Channel) error {
 	if err := e.Validate(); err != nil {
@@ -499,7 +501,7 @@ func (e Exchange) Declare(ch *Channel) error {
 }
 
 // Verify checks if this exchange exists without creating it (passive declaration).
-// If the operation causes a channel-level error (e.g., not found),
+// If the operation causes a channel-level error (e.g. not found),
 // the error will include information about the channel closure reason.
 func (e Exchange) Verify(ch *Channel) error {
 	if err := e.Validate(); err != nil {
@@ -531,7 +533,7 @@ func (e Exchange) Verify(ch *Channel) error {
 }
 
 // Delete removes this exchange.
-// If the operation causes a channel-level error (e.g., not found),
+// If the operation causes a channel-level error (e.g. not found),
 // the error will include information about the channel closure reason.
 //
 // When ifUnused is true, the exchange will not be deleted if there are any
@@ -569,7 +571,7 @@ type Queue struct {
 	Arguments Arguments
 }
 
-// NewQueue creates a new Queue with sensible defaults.
+// NewQueue creates a new Queue with sensible defaults (Durable=true).
 func NewQueue(name string) Queue {
 	return Queue{
 		Name:       name,
@@ -594,7 +596,7 @@ func (q Queue) Validate() error {
 }
 
 // Declare declares this queue using the provided channel.
-// If the operation causes a channel-level error (e.g., precondition failed),
+// If the operation causes a channel-level error (e.g. precondition failed),
 // the error will include information about the channel closure reason.
 //
 // When the error return value is not nil, you can assume the queue could not be
@@ -624,7 +626,7 @@ func (q Queue) Declare(ch *Channel) error {
 }
 
 // Verify checks if this queue exists without creating it (passive declaration).
-// If the operation causes a channel-level error (e.g., not found),
+// If the operation causes a channel-level error (e.g. not found),
 // the error will include information about the channel closure reason.
 func (q Queue) Verify(ch *Channel) error {
 	if err := q.Validate(); err != nil {
@@ -651,7 +653,7 @@ func (q Queue) Verify(ch *Channel) error {
 }
 
 // Delete removes this queue and returns the number of purged messages.
-// If the operation causes a channel-level error (e.g., not found),
+// If the operation causes a channel-level error (e.g. not found),
 // the error will include information about the channel closure reason.
 //
 // When this queue does not exist, the channel will be closed with an error.
@@ -680,7 +682,7 @@ func (q Queue) Delete(ch *Channel, ifUnused, ifEmpty bool) (int, error) {
 }
 
 // Purge removes all messages from this queue.
-// If the operation causes a channel-level error (e.g., not found),
+// If the operation causes a channel-level error (e.g. not found),
 // the error will include information about the channel closure reason.
 func (q Queue) Purge(ch *Channel) (int, error) {
 	if err := q.Validate(); err != nil {
@@ -693,7 +695,7 @@ func (q Queue) Purge(ch *Channel) (int, error) {
 }
 
 // Inspect retrieves queue information including message and consumer counts.
-// If the operation causes a channel-level error (e.g., not found),
+// If the operation causes a channel-level error (e.g. not found),
 // the error will include information about the channel closure reason.
 //
 // If a queue by this name does not exist, an error will be returned and the channel will be closed.
@@ -721,7 +723,7 @@ func (q Queue) Inspect(ch *Channel) (*struct{ Messages, Consumers int }, error) 
 	})
 }
 
-// Binding represents a queue-to-exchange binding.
+// Binding represents a queue-to-exchange or an exchange-to-exchange binding.
 type Binding struct {
 	// Type of binding destination,
 	// either "queue" or "exchange", defaults to: "queue"
@@ -732,8 +734,8 @@ type Binding struct {
 	Destination string
 	// Key used to match against message routing keys for filtering.
 	// The matching behavior depends on the source exchange type:
-	//   - direct: exact match (e.g., "orders.created")
-	//   - topic: pattern match with wildcards (e.g., "orders.*" or "*.created" or "orders.#")
+	//   - direct: exact match (e.g. "orders.created")
+	//   - topic: pattern match with wildcards (e.g. "orders.*" or "*.created" or "orders.#")
 	//     where * matches exactly one word and # matches zero or more words
 	//   - fanout: ignored, all messages are routed regardless of key
 	//   - headers: ignored, matching is based on message headers and Arguments
@@ -745,7 +747,7 @@ type Binding struct {
 	Arguments Arguments
 }
 
-// NewBinding creates a new Binding with sensible defaults.
+// NewBinding creates a new Binding with sensible defaults (Type="queue").
 func NewBinding(source, destination, key string) Binding {
 	return Binding{
 		Type:        BindingTypeQueue,
@@ -770,7 +772,7 @@ func (b Binding) Validate() error {
 }
 
 // Declare declares (binds) this binding using the provided channel.
-// If the operation causes a channel-level error (e.g., source/destination not found),
+// If the operation causes a channel-level error (e.g. source/destination not found),
 // the error will include information about the channel closure reason.
 func (b Binding) Declare(ch *Channel) error {
 	if err := b.Validate(); err != nil {
@@ -805,7 +807,7 @@ func (b Binding) Declare(ch *Channel) error {
 }
 
 // Delete removes (unbinds) this binding using the provided channel.
-// If the operation causes a channel-level error (e.g., binding not found),
+// If the operation causes a channel-level error (e.g. binding not found),
 // the error will include information about the channel closure reason.
 func (b Binding) Delete(ch *Channel) error {
 	if err := b.Validate(); err != nil {
@@ -872,7 +874,7 @@ func (rk *RoutingKey) Replace(placeholders map[string]string) {
 
 // Validate returns an error if the routing key is invalid.
 func (rk *RoutingKey) Validate() error {
-	if rk == nil || string(*rk) == "" {
+	if rk != nil && string(*rk) == "" {
 		return ErrRoutingKeyEmpty
 	}
 	return nil
