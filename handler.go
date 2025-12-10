@@ -152,15 +152,15 @@ func TimeoutMiddleware(timeout time.Duration) HandleMiddleware {
 				err    error
 			}
 
-			done := make(chan result, 1)
+			resultCh := make(chan result, 1)
 			go func() {
 				action, err := next(ctx, msg)
-				done <- result{action, err}
+				resultCh <- result{action, err}
 			}()
 
 			select {
-			case res := <-done:
-				return res.action, res.err
+			case result := <-resultCh:
+				return result.action, result.err
 			case <-ctx.Done():
 				return HandlerActionNackRequeue, fmt.Errorf("%w: message processing timeout after %vms", ErrConsumerHandlerMiddleware, timeout.Milliseconds())
 			}
@@ -197,7 +197,7 @@ func RetryMiddleware(cfg RetryMiddlewareConfig) HandleMiddleware {
 			delay := cfg.Delay
 
 			for attempt := 0; attempt <= cfg.MaxAttempts; attempt++ {
-				// check context before retry
+				// check if context is already cancelled
 				select {
 				case <-ctx.Done():
 					return HandlerActionNackRequeue, ctx.Err()
@@ -225,10 +225,7 @@ func RetryMiddleware(cfg RetryMiddlewareConfig) HandleMiddleware {
 
 				// exponential backoff
 				if cfg.Backoff {
-					delay *= 2
-					if delay > cfg.MaxDelay {
-						delay = cfg.MaxDelay
-					}
+					delay = min(delay*2, cfg.MaxDelay)
 				}
 			}
 
