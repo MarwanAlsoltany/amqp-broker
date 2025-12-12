@@ -184,7 +184,8 @@ func (b *MessageBuilder) Binary() *MessageBuilder {
 
 // Reset resets the builder to a new message with defaults.
 func (b *MessageBuilder) Reset() {
-	b.msg = NewMessage(nil)
+	msg := NewMessage(nil)
+	b.msg = &msg
 }
 
 // Build returns the constructed message.
