@@ -9,6 +9,9 @@ import (
 	"fmt"
 )
 
+// hash computes an MD5 hash of the given value. The value is encoded using gob before hashing.
+// If the value is nil, it hashes the string representation of nil.
+// Returns the hash as a hexadecimal string.
 func hash(value interface{}) string {
 	var buffer bytes.Buffer
 
