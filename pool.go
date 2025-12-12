@@ -13,10 +13,10 @@ import (
 // pool provides TTL-based pooling for reusable endpoints.
 // Uses reference counting to track active usage and automatic cleanup of idle entries.
 type pool[T any] struct {
-	once   sync.Once
-	items  sync.Map // map[string]*poolItem[T]
-	ttl    time.Duration
-	closed atomic.Bool
+	once   sync.Once     // only start cleanup goroutine once
+	items  sync.Map      // map[string]*poolItem[T]
+	ttl    time.Duration // time-to-live for idle items
+	closed atomic.Bool   // close state
 }
 
 // poolItem tracks usage metadata for pooled endpoints.
@@ -71,8 +71,8 @@ func (p *pool[T]) cleanup() error {
 		return true
 	})
 
-	if len(errs) > 0 {
-		return fmt.Errorf("%w: %w", ErrPoolClose, errors.Join(errs...))
+	if err := errors.Join(errs...); err != nil {
+		return fmt.Errorf("%w: %w", ErrPoolClose, err)
 	}
 
 	return nil
@@ -84,6 +84,7 @@ func (p *pool[T]) Close() error {
 	if !p.closed.CompareAndSwap(false, true) {
 		return nil
 	}
+
 	return p.cleanup()
 }
 
@@ -117,7 +118,7 @@ func (p *pool[T]) acquire(key string, factory func() (T, error)) (T, func(), err
 	item.refCount.Store(1)
 	item.lastUsed.Store(time.Now().UnixNano())
 
-	// handle race: another goroutine may have created it
+	// race-catcher: another goroutine may have created it
 	if actual, loaded := p.items.LoadOrStore(key, item); loaded {
 		// lost race, close ours and use the winner
 		if closer, ok := any(value).(io.Closer); ok {
