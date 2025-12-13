@@ -11,57 +11,42 @@ import (
 
 // Sentinel errors for common failure conditions.
 var (
-	ErrBroker                       error = new(Error)
-	ErrBrokerClosed                       = fmt.Errorf("%w: %s", ErrBroker, "closed")
-	ErrBrokerClose                        = fmt.Errorf("%w: %s", ErrBroker, "close failed")
-	ErrBrokerConfigInvalid                = fmt.Errorf("%w: %s", ErrBroker, "config invalid")
-	ErrBrokerMessageBuildFailed           = fmt.Errorf("%w: %s", ErrBroker, "message build failed")
-	ErrConnection                         = fmt.Errorf("%w %s", ErrBroker, "connection")
-	ErrConnectionClosed                   = fmt.Errorf("%w: %s", ErrConnection, "closed")
-	ErrConnectionNotAvailable             = fmt.Errorf("%w: %s", ErrConnection, "not available")
-	ErrConnectionManager                  = fmt.Errorf("%w %s", ErrConnection, "manager")
-	ErrConnectionManagerClosed            = fmt.Errorf("%w: %s", ErrConnectionManager, "closed")
-	ErrConnectionManagerClose             = fmt.Errorf("%w: %s", ErrConnectionManager, "close failed")
-	ErrConnectionManagerReplace           = fmt.Errorf("%w: %s", ErrConnectionManager, "replace failed")
-	ErrChannel                            = fmt.Errorf("%w %s", ErrConnection, "channel")
-	ErrChannelClosed                      = fmt.Errorf("%w: %s", ErrChannel, "closed")
-	ErrChannelNotAvailable                = fmt.Errorf("%w: %s", ErrChannel, "not available")
-	ErrPool                               = fmt.Errorf("%w %s", ErrBroker, "pool")
-	ErrPoolClosed                         = fmt.Errorf("%w: %s", ErrPool, "closed")
-	ErrPoolClose                          = fmt.Errorf("%w: %s", ErrPool, "close failed")
-	ErrTopology                           = fmt.Errorf("%w %s", ErrBroker, "topology")
-	ErrTopologyDeclareFailed              = fmt.Errorf("%w: %s", ErrTopology, "declare failed")
-	ErrTopologyDeleteFailed               = fmt.Errorf("%w: %s", ErrTopology, "delete failed")
-	ErrTopologyVerifyFailed               = fmt.Errorf("%w: %s", ErrTopology, "verify failed")
-	ErrTopologyValidation                 = fmt.Errorf("%w %s", ErrTopology, "validation")
-	ErrExchangeNameEmpty                  = fmt.Errorf("%w: %s", ErrTopologyValidation, "exchange name empty")
-	ErrQueueNameEmpty                     = fmt.Errorf("%w: %s", ErrTopologyValidation, "queue name empty")
-	ErrBindingFieldsEmpty                 = fmt.Errorf("%w: %s", ErrTopologyValidation, "binding field(s) empty")
-	ErrRoutingKeyEmpty                    = fmt.Errorf("%w: %s", ErrTopologyValidation, "routing key empty")
-	ErrEndpoint                           = fmt.Errorf("%w %s", ErrBroker, "endpoint")
-	ErrEndpointClosed                     = fmt.Errorf("%w: %s", ErrEndpoint, "closed")
-	ErrEndpointClose                      = fmt.Errorf("%w: %s", ErrEndpoint, "close failed")
-	ErrEndpointNotReadyTimeout            = fmt.Errorf("%w: %s", ErrEndpoint, "not ready within timeout")
-	ErrEndpointNoAutoReconnect            = fmt.Errorf("%w: %s", ErrEndpoint, "auto-reconnect is disabled")
-	ErrPublisher                          = fmt.Errorf("%w %s", ErrBroker, "publisher")
-	ErrPublisherClosed                    = fmt.Errorf("%w: %s", ErrPublisher, "closed")
-	ErrPublisherNotConnected              = fmt.Errorf("%w: %s", ErrPublisher, "not connected")
-	ErrPublisherFlowPaused                = fmt.Errorf("%w: %s", ErrPublisher, "flow paused by server")
-	ErrPublisherConfirmNotAvailable       = fmt.Errorf("%w: %s", ErrPublisher, "confirmation channel not available")
-	ErrPublisherPublishFailed             = fmt.Errorf("%w: %s", ErrPublisher, "message publish failed")
-	ErrPublisherPublishConfirm            = fmt.Errorf("%w: %s", ErrPublisher, "message not confirmed by server")
-	ErrPublisherConfirmTimeout            = fmt.Errorf("%w: %s", ErrPublisher, "message confirmation timeout")
-	ErrConsumer                           = fmt.Errorf("%w %s", ErrBroker, "consumer")
-	ErrConsumerClosed                     = fmt.Errorf("%w: %s", ErrConsumer, "closed")
-	ErrConsumerNotConnected               = fmt.Errorf("%w: %s", ErrConsumer, "not connected")
-	ErrConsumerConsumerFailed             = fmt.Errorf("%w: %s", ErrConsumer, "message consume failed")
-	ErrConsumerCancelled                  = fmt.Errorf("%w: %s", ErrConsumer, "cancelled")
-	ErrConsumerAckFailed                  = fmt.Errorf("%w: %s", ErrConsumer, "acknowledgment failed")
-	ErrConsumerHandler                    = fmt.Errorf("%w: %s", ErrConsumer, "handler error")
-	ErrConsumerHandlerMiddleware          = fmt.Errorf("%w: %s", ErrConsumer, "middleware error")
-	ErrMessage                            = fmt.Errorf("%w %s", ErrBroker, "message")
-	ErrMessageNotPublished                = fmt.Errorf("%w: %s", ErrMessage, "not a published message (outgoing)")
-	ErrMessageNotConsumed                 = fmt.Errorf("%w: %s", ErrMessage, "not a consumed message (incoming)")
+	ErrBroker                     error = new(Error)
+	ErrBrokerClosed                     = fmt.Errorf("%w: %s", ErrBroker, "closed")
+	ErrBrokerConfigInvalid              = fmt.Errorf("%w: %s", ErrBroker, "config invalid")
+	ErrConnection                       = fmt.Errorf("%w %s", ErrBroker, "connection")
+	ErrConnectionClosed                 = fmt.Errorf("%w: %s", ErrConnection, "closed")
+	ErrConnectionManager                = fmt.Errorf("%w %s", ErrConnection, "manager")
+	ErrConnectionManagerClosed          = fmt.Errorf("%w: %s", ErrConnectionManager, "closed")
+	ErrChannel                          = fmt.Errorf("%w %s", ErrConnection, "channel")
+	ErrChannelClosed                    = fmt.Errorf("%w: %s", ErrChannel, "closed")
+	ErrPool                             = fmt.Errorf("%w %s", ErrBroker, "pool")
+	ErrPoolClosed                       = fmt.Errorf("%w: %s", ErrPool, "closed")
+	ErrTopology                         = fmt.Errorf("%w %s", ErrBroker, "topology")
+	ErrTopologyDeclareFailed            = fmt.Errorf("%w: %s", ErrTopology, "declare failed")
+	ErrTopologyDeleteFailed             = fmt.Errorf("%w: %s", ErrTopology, "delete failed")
+	ErrTopologyVerifyFailed             = fmt.Errorf("%w: %s", ErrTopology, "verify failed")
+	ErrTopologyValidation               = fmt.Errorf("%w %s", ErrTopology, "validation")
+	ErrTopologyExchangeNameEmpty        = fmt.Errorf("%w: %s", ErrTopologyValidation, "exchange name empty")
+	ErrTopologyQueueNameEmpty           = fmt.Errorf("%w: %s", ErrTopologyValidation, "queue name empty")
+	ErrTopologyBindingFieldsEmpty       = fmt.Errorf("%w: %s", ErrTopologyValidation, "binding field(s) empty")
+	ErrTopologyRoutingKeyEmpty          = fmt.Errorf("%w: %s", ErrTopologyValidation, "routing key empty")
+	ErrEndpoint                         = fmt.Errorf("%w %s", ErrBroker, "endpoint")
+	ErrEndpointClosed                   = fmt.Errorf("%w: %s", ErrEndpoint, "closed")
+	ErrEndpointNotConnected             = fmt.Errorf("%w: %s", ErrEndpoint, "not connected")
+	ErrEndpointNotReadyTimeout          = fmt.Errorf("%w: %s", ErrEndpoint, "not ready within timeout")
+	ErrEndpointNoAutoReconnect          = fmt.Errorf("%w: %s", ErrEndpoint, "auto-reconnect is disabled")
+	ErrPublisher                        = fmt.Errorf("%w %s", ErrBroker, "publisher")
+	ErrPublisherClosed                  = fmt.Errorf("%w: %s", ErrPublisher, "closed")
+	ErrPublisherNotConnected            = fmt.Errorf("%w: %s", ErrPublisher, "not connected")
+	ErrConsumer                         = fmt.Errorf("%w %s", ErrBroker, "consumer")
+	ErrConsumerClosed                   = fmt.Errorf("%w: %s", ErrConsumer, "closed")
+	ErrConsumerNotConnected             = fmt.Errorf("%w: %s", ErrConsumer, "not connected")
+	ErrMiddleware                       = fmt.Errorf("%w %s", ErrBroker, "middleware")
+	ErrMessage                          = fmt.Errorf("%w %s", ErrBroker, "message")
+	ErrMessageBuild                     = fmt.Errorf("%w: %s", ErrMessage, "message build failed")
+	ErrMessageNotPublished              = fmt.Errorf("%w: %s", ErrMessage, "not a published message (outgoing)")
+	ErrMessageNotConsumed               = fmt.Errorf("%w: %s", ErrMessage, "not a consumed message (incoming)")
 )
 
 // Error provides structured error information with context.
@@ -121,6 +106,27 @@ func (e *Error) Error() string {
 // Unwrap returns the underlying error (single unwrap).
 func (e *Error) Unwrap() error {
 	return e.Err
+}
+
+// Is makes any *Error compare equal to the sentinel ErrBroker.
+// This ensures errors.Is(err, ErrBroker) returns true for any broker Error.
+func (e *Error) Is(target error) bool {
+	if e == nil || target == nil {
+		return false
+	}
+
+	// match broker sentinel directly
+	if target == ErrBroker {
+		return true
+	}
+
+	// match any *Error target type (e.g. errors.Is(err, &Error{})).
+	if _, ok := target.(*Error); ok {
+		return true
+	}
+
+	// fallback: delegate to the wrapped error chain (e.Err to avoid recursion)
+	return errors.Is(e.Err, target)
 }
 
 // wrapError aggregates one or more underlying errors using errors.Join when appropriate.
