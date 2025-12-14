@@ -211,7 +211,7 @@ func (c *consumer) Get() (*Message, error) {
 
 	delivery, ok, err := ch.Get(c.queue.Name, c.opts.AutoAck)
 	if err != nil {
-		return nil, wrapError("get message", err)
+		return nil, fmt.Errorf("%w: get: %w", ErrConsumer, err)
 	}
 
 	if !ok {
@@ -240,7 +240,7 @@ func (c *consumer) Cancel() error {
 
 	// consumer.id is the consumer tag, see call to ch.Consume
 	if err := ch.Cancel(c.id, false); err != nil {
-		return wrapError("cancel consumer", err)
+		return fmt.Errorf("%w: cancel: %w", ErrConsumer, err)
 	}
 
 	return nil
@@ -315,6 +315,9 @@ func (c *consumer) connect(ctx context.Context) error {
 		return wrapError("start consuming", err)
 	}
 
+	// channels are buffered channels to avoid deadlocks, unless otherwise noted,
+	// the library sends the notification once then closes the X channel
+
 	// set up close notification channel
 	var closeCh = ch.NotifyClose(make(chan *amqp.Error, 1))
 	// set up cancel notification channel
@@ -325,6 +328,8 @@ func (c *consumer) connect(ctx context.Context) error {
 	c.deliveryCh = deliveryCh
 	c.cancelCh = cancelCh
 	c.stateMu.Unlock()
+
+	c.cancelled.Store(false) // start in uncancelled state until cancel notification is received
 
 	go c.handleDeliveries(ctx) // start delivery handler goroutine
 	go c.handleCancel(ctx)     // start cancel handler goroutine
@@ -355,14 +360,12 @@ func (c *consumer) disconnect(_ context.Context) error {
 // monitor watches for channel closures and cancellations.
 func (c *consumer) monitor(ctx context.Context) error {
 	for {
-		// closeCh is a buffered channel to avoid deadlock
-		// library sends notification once, then closes it
 		c.stateMu.RLock()
 		closeCh := c.closeCh
 		c.stateMu.RUnlock()
 
 		if closeCh == nil {
-			return ErrConsumerNotConnected
+			return nil // channel closed, exit monitor
 		}
 
 		select {
@@ -377,6 +380,34 @@ func (c *consumer) monitor(ctx context.Context) error {
 				go c.opts.OnError(amqpErr)
 			}
 			return amqpErr
+		}
+	}
+}
+
+// handleCancel processes consumer cancellation notifications from the server.
+func (c *consumer) handleCancel(ctx context.Context) {
+	for {
+		c.stateMu.RLock()
+		cancelCh := c.cancelCh
+		c.stateMu.RUnlock()
+
+		if cancelCh == nil {
+			return
+		}
+
+		select {
+		case <-ctx.Done():
+			return
+		case tag, ok := <-cancelCh:
+			if !ok {
+				return
+			}
+			// set cancelled state
+			c.cancelled.Store(true)
+			// notify user if callback is provided
+			if c.opts.OnCancel != nil {
+				go c.opts.OnCancel(tag)
+			}
 		}
 	}
 }
@@ -455,7 +486,8 @@ func (c *consumer) processMessage(ctx context.Context, msg *Message) {
 
 	// notify user of handler error if callback provided
 	if err != nil && c.opts.OnError != nil {
-		go c.opts.OnError(fmt.Errorf("%w: handler failed for message %q: %w", ErrConsumerHandler, msg.MessageID, err))
+		err := fmt.Errorf("%w: handler failed for message %q: %w", ErrConsumer, msg.MessageID, err)
+		go c.opts.OnError(err)
 	}
 
 	if c.opts.AutoAck {
@@ -476,36 +508,7 @@ func (c *consumer) processMessage(ctx context.Context, msg *Message) {
 
 	// notify user of ack/nack error if callback provided
 	if ackErr != nil && c.opts.OnError != nil {
-		go c.opts.OnError(fmt.Errorf("%w: %s failed for message %q: %w", ErrConsumerAckFailed, action.String(), msg.MessageID, ackErr))
-	}
-}
-
-// handleCancel processes consumer cancellation notifications from the server.
-func (c *consumer) handleCancel(ctx context.Context) {
-	c.cancelled.Store(false) // reset cancelled state
-
-	for {
-		c.stateMu.RLock()
-		cancelCh := c.cancelCh
-		c.stateMu.RUnlock()
-
-		if cancelCh == nil {
-			return
-		}
-
-		select {
-		case <-ctx.Done():
-			return
-		case tag, ok := <-cancelCh:
-			if !ok {
-				return
-			}
-			// set cancelled state
-			c.cancelled.Store(true)
-			// notify user if callback is provided
-			if c.opts.OnCancel != nil {
-				go c.opts.OnCancel(tag)
-			}
-		}
+		err := fmt.Errorf("%w: ack (action=%s) failed for message %q: %w", ErrConsumer, action.String(), msg.MessageID, ackErr)
+		go c.opts.OnError(err)
 	}
 }
