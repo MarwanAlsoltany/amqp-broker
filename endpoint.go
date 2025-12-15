@@ -181,7 +181,7 @@ func (e *endpoint) Close() error {
 		err := e.ch.Close()
 		e.ch = nil
 		if err != nil {
-			return fmt.Errorf("%w: %w", ErrEndpointClose, err)
+			return fmt.Errorf("%w: close failed: %w", ErrEndpoint, err)
 		}
 	}
 
@@ -196,21 +196,36 @@ func (e *endpoint) Release() {
 
 // Exchange declares an exchange on the endpoint's channel.
 func (e *endpoint) Exchange(exchange Exchange) error {
-	return e.broker.topologyMgr.declare(e.Channel(), &Topology{
+	ch := e.Channel()
+	if ch == nil {
+		return ErrEndpointNotConnected
+	}
+
+	return e.broker.topologyMgr.declare(ch, &Topology{
 		Exchanges: []Exchange{exchange},
 	})
 }
 
 // Queue declares a queue on the endpoint's channel.
 func (e *endpoint) Queue(queue Queue) error {
-	return e.broker.topologyMgr.declare(e.Channel(), &Topology{
+	ch := e.Channel()
+	if ch == nil {
+		return ErrEndpointNotConnected
+	}
+
+	return e.broker.topologyMgr.declare(ch, &Topology{
 		Queues: []Queue{queue}},
 	)
 }
 
 // Binding declares a binding on the endpoint's channel.
 func (e *endpoint) Binding(binding Binding) error {
-	return e.broker.topologyMgr.declare(e.Channel(), &Topology{
+	ch := e.Channel()
+	if ch == nil {
+		return ErrEndpointNotConnected
+	}
+
+	return e.broker.topologyMgr.declare(ch, &Topology{
 		Bindings: []Binding{binding}},
 	)
 }
