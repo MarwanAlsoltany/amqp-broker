@@ -151,7 +151,7 @@ func (p *publisher) Publish(ctx context.Context, rk RoutingKey, msgs ...Message)
 
 	// check flow control state
 	if !p.flow.Load() {
-		return ErrPublisherFlowPaused
+		return fmt.Errorf("%w: %s", ErrPublisher, "flow paused by server")
 	}
 
 	// no assumptions are made about declaring the queue automatically
@@ -172,7 +172,7 @@ func (p *publisher) Publish(ctx context.Context, rk RoutingKey, msgs ...Message)
 				pub,
 			)
 			if err != nil {
-				return fmt.Errorf("%w: message %d: %w", ErrPublisherPublishFailed, i, err)
+				return fmt.Errorf("%w: message %d publish failed: %w", ErrPublisher, i, err)
 			}
 			// invoke callback with delivery tag and wait function
 			p.opts.OnConfirm(conf.DeliveryTag, func(ctx context.Context) bool {
@@ -196,7 +196,7 @@ func (p *publisher) Publish(ctx context.Context, rk RoutingKey, msgs ...Message)
 				pub,
 			)
 			if err != nil {
-				return fmt.Errorf("%w: message %d: %w", ErrPublisherPublishFailed, i, err)
+				return fmt.Errorf("%w: message %d publish failed: %w", ErrPublisher, i, err)
 			}
 		}
 	}
@@ -208,7 +208,7 @@ func (p *publisher) Publish(ctx context.Context, rk RoutingKey, msgs ...Message)
 		confirmCh := p.confirmCh
 		p.stateMu.RUnlock()
 		if confirmCh == nil {
-			return ErrPublisherConfirmNotAvailable
+			return fmt.Errorf("%w: %s", ErrPublisherNotConnected, "confirmation channel not available")
 		}
 
 		timeout := p.opts.ConfirmTimeout
@@ -220,12 +220,12 @@ func (p *publisher) Publish(ctx context.Context, rk RoutingKey, msgs ...Message)
 			select {
 			case c := <-confirmCh:
 				if !c.Ack {
-					return fmt.Errorf("%w: message %d", ErrPublisherPublishConfirm, i)
+					return fmt.Errorf("%w: message %d not confirmed by server", ErrPublisher, i)
 				}
 			case <-ctx.Done():
 				return ctx.Err()
 			case <-time.After(timeout):
-				return fmt.Errorf("%w: message %d", ErrPublisherConfirmTimeout, i)
+				return fmt.Errorf("%w: message %d confirm timeout", ErrPublisher, i)
 			}
 		}
 	}
@@ -274,10 +274,13 @@ func (p *publisher) connect(ctx context.Context) error {
 	if err != nil {
 		// allow bypassing validation error without failing
 		// (when routing-key == queue), i.e. using "amq.direct"
-		if !errors.Is(err, ErrExchangeNameEmpty) {
+		if !errors.Is(err, ErrTopologyExchangeNameEmpty) {
 			return err
 		}
 	}
+
+	// channels are buffered channels to avoid deadlocks, unless otherwise noted,
+	// the library sends the notification once then closes the X channel
 
 	// set up channel close notification channel
 	var closeCh = ch.NotifyClose(make(chan *amqp.Error, 1))
@@ -315,7 +318,7 @@ func (p *publisher) connect(ctx context.Context) error {
 
 	go p.handleReturns(ctx) // start return handler goroutine
 	go p.handleFlow(ctx)    // start flow control handler goroutine
-	// with deferred confirmations, confirmCh still need to be consumed to avoid deadlocks,
+	// with deferred confirmations, confirmCh still needs to be drained to avoid deadlocks,
 	// even though the confirmations are handled by amqp.DeferredConfirmation objects
 	if p.opts.ConfirmMode && p.opts.OnConfirm != nil {
 		go p.handleConfirmations(ctx) // start confirmations handler goroutine
@@ -353,7 +356,7 @@ func (p *publisher) monitor(ctx context.Context) error {
 		p.stateMu.RUnlock()
 
 		if closeCh == nil {
-			return ErrPublisherNotConnected
+			return nil // channel closed, exit monitor
 		}
 
 		select {
