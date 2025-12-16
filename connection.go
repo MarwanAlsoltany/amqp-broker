@@ -39,8 +39,9 @@ func newConnection(url string, config *Config) (*Connection, error) {
 	}
 
 	if err != nil {
-		return nil, wrapError("dial connection", err)
+		return nil, fmt.Errorf("%w: dial failed: %w", ErrConnection, err)
 	}
+
 	return conn, nil
 }
 
@@ -135,14 +136,14 @@ func (cm *connectionManager) replace(idx int) error {
 	defer cm.poolMu.Unlock()
 
 	if idx < 0 || idx >= len(cm.pool) {
-		return fmt.Errorf("%w: invalid connection index: %d", ErrConnectionNotAvailable, idx)
+		return fmt.Errorf("%w: replace connection %d: out of range", ErrConnectionManager, idx)
 	}
 
 	// create new connection
 	conn, err := newConnection(cm.url, cm.opts.dialConfig)
 	if err != nil {
 		// m.pool[idx] = nil
-		return fmt.Errorf("%w: replace connection %d: %w", ErrConnectionManagerReplace, idx, err)
+		return fmt.Errorf("%w: replace connection %d: %w", ErrConnectionManager, idx, err)
 	}
 
 	// close old connection if still open
@@ -337,12 +338,7 @@ func (cm *connectionManager) assign(role endpointRole) (*Connection, error) {
 
 	conn := cm.pool[idx]
 	if conn == nil {
-		return nil, ErrConnectionNotAvailable
-	}
-
-	// check if connection is closed
-	if conn.IsClosed() {
-		return nil, ErrConnectionClosed
+		return nil, fmt.Errorf("%w: assign connection %d: not available", ErrConnectionManager, idx)
 	}
 
 	return conn, nil
@@ -373,7 +369,7 @@ func (cm *connectionManager) Close() error {
 	}
 
 	if err := errors.Join(errs...); err != nil {
-		return fmt.Errorf("%w: %w", ErrConnectionManagerClose, err)
+		return fmt.Errorf("%w: close failed: %w", ErrConnectionManager, err)
 	}
 
 	return nil
@@ -416,7 +412,7 @@ func doSafeChannelActionWithReturn[T any](ch *Channel, op func(*Channel) (T, err
 	var zero T
 
 	if ch == nil {
-		return zero, ErrChannelNotAvailable
+		return zero, fmt.Errorf("%w: not available", ErrChannel)
 	}
 
 	// create a buffered channel to avoid deadlock
