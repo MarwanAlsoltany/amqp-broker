@@ -56,15 +56,15 @@ type Broker struct {
 
 	// publisher registry for managed publishers
 	publishers    map[string]Publisher // map of publisher ID to Publisher
-	publishersMu  sync.Mutex // protects publishers map
-	publishersSeq atomic.Uint32 // publisher ID sequence
+	publishersMu  sync.Mutex           // protects publishers map
+	publishersSeq atomic.Uint32        // publisher ID sequence
 	// cached publisher pool for one-off publishes
 	publishersPool *pool[Publisher]
 
 	// consumer registry for managed consumers
 	consumers    map[string]Consumer // map of consumer ID to Consumer
-	consumersMu  sync.Mutex // protects consumers map
-	consumersSeq atomic.Uint32 // consumer ID sequence
+	consumersMu  sync.Mutex          // protects consumers map
+	consumersSeq atomic.Uint32       // consumer ID sequence
 	// unlike publisher, pooling is not needed for consumers
 	// as they are long-lived and get destroyed after use
 
@@ -230,12 +230,19 @@ func New(opts ...BrokerOption) (*Broker, error) {
 
 // Connection returns the control connection for topology operations (exchanges, queues, bindings).
 //
-// The returned connection is managed by the Broker and should not be closed by the caller.
+// NOTE: The returned connection is managed by the Broker and should not be closed by the caller.
+//
+// NOTE: The returned connection is not guaranteed to be the same across calls.
+//
 // Returns an error if no connection is available or the broker is closed.
 func (b *Broker) Connection() (*Connection, error) {
 	conn, err := b.connectionMgr.assign(roleController)
 	if err != nil {
 		return nil, wrapError("create control connection", err)
+	}
+	// safe-guard: make sure connection is open
+	if conn.IsClosed() {
+		return nil, ErrConnectionClosed
 	}
 
 	return conn, nil
@@ -243,7 +250,10 @@ func (b *Broker) Connection() (*Connection, error) {
 
 // Channel returns a new control channel for topology operations (exchanges, queues, bindings).
 //
-// The caller is responsible for closing the returned channel when done.
+// NOTE: The caller is responsible for closing the returned channel when done.
+//
+// NOTE: The returned channel is not guaranteed to be the same across calls.
+//
 // Returns an error if the control connection is unavailable or the broker is closed.
 func (b *Broker) Channel() (*Channel, error) {
 	conn, err := b.Connection()
@@ -254,6 +264,10 @@ func (b *Broker) Channel() (*Channel, error) {
 	ch, err := conn.Channel()
 	if err != nil {
 		return nil, wrapError("create control channel", err)
+	}
+	// safe-guard: make sure channel is open
+	if ch.IsClosed() {
+		return nil, ErrChannelClosed
 	}
 
 	return ch, nil
@@ -309,7 +323,7 @@ func (b *Broker) Close() error {
 	}
 
 	if err := errors.Join(errs...); err != nil {
-		return fmt.Errorf("%w: %w", ErrBrokerClose, err)
+		return fmt.Errorf("%w: close failed: %w", ErrBroker, err)
 	}
 
 	return nil
@@ -544,9 +558,9 @@ func (b *Broker) Transaction(ctx context.Context, fn func(*Channel) error) error
 	if fnErr != nil {
 		if rbErr := ch.TxRollback(); rbErr != nil {
 			// return an error that lets callers inspect both errors
-			return wrapError("transaction rollback", fnErr, rbErr)
+			return wrapError("transaction rollback", rbErr, fnErr)
 		}
-		return fnErr
+		return wrapError("transaction function", fnErr)
 	}
 
 	if err := ch.TxCommit(); err != nil {
