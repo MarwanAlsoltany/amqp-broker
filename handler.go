@@ -132,7 +132,7 @@ func RecoveryMiddleware(logger *slog.Logger) HandleMiddleware {
 						slog.Any("panic", r),
 					)
 					action = HandlerActionNackRequeue
-					err = fmt.Errorf("%w: panic: %v", ErrConsumerHandlerMiddleware, r)
+					err = fmt.Errorf("%w: recovered panic: %v", ErrMiddleware, r)
 				}
 			}()
 			return next(ctx, msg)
@@ -162,7 +162,7 @@ func TimeoutMiddleware(timeout time.Duration) HandleMiddleware {
 			case result := <-resultCh:
 				return result.action, result.err
 			case <-ctx.Done():
-				return HandlerActionNackRequeue, fmt.Errorf("%w: message processing timeout after %vms", ErrConsumerHandlerMiddleware, timeout.Milliseconds())
+				return HandlerActionNackRequeue, fmt.Errorf("%w: message processing timeout after %vms", ErrMiddleware, timeout.Milliseconds())
 			}
 		}
 	}
