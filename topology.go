@@ -463,7 +463,7 @@ func (e Exchange) Matches(other Exchange) bool {
 // Validate returns an error if the exchange is invalid.
 func (e Exchange) Validate() error {
 	if e.Name == "" {
-		return ErrExchangeNameEmpty
+		return ErrTopologyExchangeNameEmpty
 	}
 	return nil
 }
@@ -590,7 +590,7 @@ func (q Queue) Matches(other Queue) bool {
 // Validate returns an error if the queue is invalid.
 func (q Queue) Validate() error {
 	if q.Name == "" {
-		return ErrQueueNameEmpty
+		return ErrTopologyQueueNameEmpty
 	}
 	return nil
 }
@@ -766,7 +766,7 @@ func (b Binding) Matches(other Binding) bool {
 // Validate returns an error if the binding is invalid.
 func (b Binding) Validate() error {
 	if b.Source == "" || b.Destination == "" {
-		return ErrBindingFieldsEmpty
+		return ErrTopologyBindingFieldsEmpty
 	}
 	return nil
 }
@@ -875,7 +875,7 @@ func (rk *RoutingKey) Replace(placeholders map[string]string) {
 // Validate returns an error if the routing key is invalid.
 func (rk *RoutingKey) Validate() error {
 	if rk != nil && string(*rk) == "" {
-		return ErrRoutingKeyEmpty
+		return ErrTopologyRoutingKeyEmpty
 	}
 	return nil
 }
