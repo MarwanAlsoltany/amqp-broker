@@ -72,7 +72,7 @@ func (p *pool[T]) cleanup() error {
 	})
 
 	if err := errors.Join(errs...); err != nil {
-		return fmt.Errorf("%w: %w", ErrPoolClose, err)
+		return fmt.Errorf("%w: close failed: %w", ErrPool, err)
 	}
 
 	return nil

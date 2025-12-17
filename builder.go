@@ -48,7 +48,7 @@ func (b *MessageBuilder) BodyJSON(v interface{}) *MessageBuilder {
 	data, err := json.Marshal(v)
 	if err != nil {
 		b.msg.Body = []byte{}
-		b.appendErr(fmt.Errorf("%w: BodyJSON: %v", ErrBrokerMessageBuildFailed, err))
+		b.appendErr(fmt.Errorf("%w: BodyJSON: %v", ErrMessageBuild, err))
 	} else {
 		b.msg.Body = data
 		b.msg.ContentType = "application/json"
