@@ -61,6 +61,59 @@ const (
 	defaultContentType = "application/octet-stream"
 )
 
+func validateTimeBounds(min, max time.Duration) error {
+	if min <= 0 {
+		return fmt.Errorf("min must be greater than zero")
+	}
+	if max <= min {
+		return fmt.Errorf("max must be greater than min (%s)", min)
+	}
+	return nil
+}
+
+// defaultConnectionManagerOptions returns the default connection manager configuration.
+func defaultConnectionManagerOptions() ConnectionManagerOptions {
+	return ConnectionManagerOptions{
+		Config:          nil,
+		Size:            defaultConnectionPoolSize,
+		NoAutoReconnect: false,
+		ReconnectMin:    defaultReconnectMin,
+		ReconnectMax:    defaultReconnectMax,
+		OnOpen:          nil,
+		OnClose:         nil,
+		OnBlock:         nil,
+	}
+}
+
+// mergeConnectionManagerOptions merges user options with defaults.
+// User-specified values take precedence; zero values are replaced with defaults.
+func mergeConnectionManagerOptions(user, defaults ConnectionManagerOptions) ConnectionManagerOptions {
+	if user.Size <= 0 {
+		user.Size = defaults.Size
+	}
+	if user.ReconnectMin == 0 {
+		user.ReconnectMin = defaults.ReconnectMin
+	}
+	if user.ReconnectMax == 0 {
+		user.ReconnectMax = defaults.ReconnectMax
+	}
+	// for other fields user value is always explicit ...
+	return user
+}
+
+// validateConnectionManagerOptions validates connection manager configuration.
+func validateConnectionManagerOptions(opts ConnectionManagerOptions) error {
+	if opts.Size <= 0 {
+		return fmt.Errorf("pool size must be positive, got %d", opts.Size)
+	}
+
+	if err := validateTimeBounds(opts.ReconnectMin, opts.ReconnectMax); err != nil {
+		return fmt.Errorf("reconnect %w", err)
+	}
+
+	return nil
+}
+
 // defaultEndpointOptions returns EndpointOptions with defaults applied.
 func defaultEndpointOptions() EndpointOptions {
 	return EndpointOptions{
@@ -83,9 +136,17 @@ func mergeEndpointOptions(user, defaults EndpointOptions) EndpointOptions {
 	if user.ReadyTimeout == 0 {
 		user.ReadyTimeout = defaults.ReadyTimeout
 	}
-	// NoAutoReconnect and NoWaitReady are bools,
-	// so user value is always explicit (false is a valid override)
+	// for other fields user value is always explicit ...
 	return user
+}
+
+// validateEndpointOptions validates endpoint configuration.
+func validateEndpointOptions(opts EndpointOptions) error {
+	if err := validateTimeBounds(opts.ReconnectMin, opts.ReconnectMax); err != nil {
+		return fmt.Errorf("reconnect %w", err)
+	}
+	// other fields require no validation ...
+	return nil
 }
 
 // defaultPublishOptions returns PublishOptions with defaults applied.
@@ -109,9 +170,16 @@ func mergePublisherOptions(user, defaults PublisherOptions) PublisherOptions {
 	if user.ConfirmTimeout == 0 {
 		user.ConfirmTimeout = defaults.ConfirmTimeout
 	}
-	// other fields are bools or function pointers,
-	// so user value is always explicit (false/nil are valid overrides)
+	// for other fields user value is always explicit ...
 	return user
+}
+
+func validatePublisherOptions(opts PublisherOptions) error {
+	if err := validateEndpointOptions(opts.EndpointOptions); err != nil {
+		return err
+	}
+	// other fields require no validation ...
+	return nil
 }
 
 // defaultConsumerOptions returns ConsumeOptions with defaults applied.
@@ -137,7 +205,14 @@ func mergeConsumerOptions(user, defaults ConsumerOptions) ConsumerOptions {
 	if user.MaxConcurrentHandlers == 0 {
 		user.MaxConcurrentHandlers = defaults.MaxConcurrentHandlers
 	}
-	// other fields are bools or function pointers,
-	// so user value is always explicit (false/nil are valid overrides)
+	// for other fields user value is always explicit ...
 	return user
+}
+
+func validateConsumerOptions(opts ConsumerOptions) error {
+	if err := validateEndpointOptions(opts.EndpointOptions); err != nil {
+		return err
+	}
+	// other fields require no validation ...
+	return nil
 }

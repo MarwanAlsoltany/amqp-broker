@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	amqp "github.com/rabbitmq/amqp091-go"
 )
@@ -25,6 +27,53 @@ type (
 	// Parameters: idx (connection pool index), active (true=blocked, false=unblocked),
 	// reason (blocking reason, only set when active=true)
 	ConnectionOnBlockHandler func(idx int, active bool, reason string)
+
+	// ConnectionManagerOptions configures connection pool behavior, including
+	// pool size, dial configuration, event handlers, and automatic reconnection.
+	ConnectionManagerOptions struct {
+		// Size determines the number of managed connections in the pool.
+		// - Size 1: All operations share one connection
+		// - Size 2: Publishers/Control use one, Consumers use another (recommended for most cases)
+		// - Size 3+: Dedicated connections for publishers, consumers, and control
+		// Default: defaultConnectionPoolSize (1)
+		Size int
+
+		// Config sets the AMQP connection configuration for TLS, SASL,
+		// heartbeat, channel limits, frame size, vhost, and properties.
+		// Default: none (uses library defaults)
+		Config *Config
+
+		// OnOpen is called when a connection is successfully established or re-established.
+		// Parameters: idx (connection pool index)
+		// Default: none
+		OnOpen ConnectionOnOpenHandler
+
+		// OnClose is called when a connection closes unexpectedly.
+		// Parameters: idx (pool index), code (AMQP error code), reason (description),
+		// server (true if server-initiated), recover (true if recoverable)
+		// Default: none
+		OnClose ConnectionOnCloseHandler
+
+		// OnBlock is called when RabbitMQ flow control activates/deactivates.
+		// Parameters: idx (pool index), active (true=blocked, false=unblocked),
+		// reason (only set when active=true)
+		// Default: none
+		OnBlock ConnectionOnBlockHandler
+
+		// NoAutoReconnect disables automatic reconnection on connection failure.
+		// Default: false
+		NoAutoReconnect bool
+
+		// ReconnectMin is the minimum delay between reconnection attempts.
+		// Only used if NoAutoReconnect is false.
+		// Default: defaultReconnectMin (500ms)
+		ReconnectMin time.Duration
+
+		// ReconnectMax is the maximum delay between reconnection attempts.
+		// Only used if NoAutoReconnect is false.
+		// Default: defaultReconnectMax (30s)
+		ReconnectMax time.Duration
+	}
 )
 
 // newConnection establishes a new AMQP connection using the provided config.
@@ -49,7 +98,7 @@ func newConnection(url string, config *Config) (*Connection, error) {
 // Connections are assigned to endpoints based on their role and held for their lifetime.
 type connectionManager struct {
 	url  string
-	opts connectionManagerOptions
+	opts ConnectionManagerOptions
 
 	pool   []*Connection
 	poolMu sync.RWMutex
@@ -65,28 +114,19 @@ type connectionManager struct {
 	closed atomic.Bool
 }
 
-type connectionManagerOptions struct {
-	size       int
-	dialConfig *Config
-	onOpen     ConnectionOnOpenHandler
-	onClose    ConnectionOnCloseHandler
-	onBlock    ConnectionOnBlockHandler
-}
-
-// newConnectionManager creates a new connection manager with the specified size.
-// Size determines how many long-lived connections are maintained.
-func newConnectionManager(url string, opts *connectionManagerOptions) *connectionManager {
+// newConnectionManager creates a new connection manager with the specified options.
+// Options are merged with defaults for any unspecified fields.
+func newConnectionManager(url string, opts *ConnectionManagerOptions) *connectionManager {
 	cn := &connectionManager{url: url}
 
 	if opts != nil {
 		cn.opts = *opts
 	}
 
-	if cn.opts.size <= 0 {
-		cn.opts.size = defaultConnectionPoolSize
-	}
+	// merge with defaults to ensure all fields have valid values
+	cn.opts = mergeConnectionManagerOptions(cn.opts, defaultConnectionManagerOptions())
 
-	cn.pool = make([]*Connection, cn.opts.size)
+	cn.pool = make([]*Connection, cn.opts.Size)
 
 	return cn
 }
@@ -100,6 +140,10 @@ func (cm *connectionManager) init(ctx context.Context) error {
 	default:
 	}
 
+    if err := validateConnectionManagerOptions(cm.opts); err != nil {
+        return fmt.Errorf("%w: %w", ErrConnectionManager, err)
+    }
+
 	cm.poolMu.Lock()
 	defer cm.poolMu.Unlock()
 
@@ -107,7 +151,7 @@ func (cm *connectionManager) init(ctx context.Context) error {
 	cm.ctx, cm.cancel = context.WithCancel(ctx)
 
 	for i := 0; i < len(cm.pool); i++ {
-		conn, err := newConnection(cm.url, cm.opts.dialConfig)
+		conn, err := newConnection(cm.url, cm.opts.Config)
 		if err != nil {
 			// close any connections already opened
 			for j := 0; j < i; j++ {
@@ -127,6 +171,7 @@ func (cm *connectionManager) init(ctx context.Context) error {
 }
 
 // replace replaces a failed connection at the given index with a new one.
+// It retries with exponential backoff until successful or the manager is closed.
 func (cm *connectionManager) replace(idx int) error {
 	if cm.closed.Load() {
 		return ErrConnectionManagerClosed
@@ -139,24 +184,71 @@ func (cm *connectionManager) replace(idx int) error {
 		return fmt.Errorf("%w: replace connection %d: out of range", ErrConnectionManager, idx)
 	}
 
-	// create new connection
-	conn, err := newConnection(cm.url, cm.opts.dialConfig)
-	if err != nil {
-		// m.pool[idx] = nil
-		return fmt.Errorf("%w: replace connection %d: %w", ErrConnectionManager, idx, err)
-	}
-
 	// close old connection if still open
 	if cm.pool[idx] != nil {
 		_ = cm.pool[idx].Close()
+		cm.pool[idx] = nil // explicitly clear the slot
 	}
 
-	// replace with new connection
-	cm.pool[idx] = conn
+	autoReconnect := !cm.opts.NoAutoReconnect
+	reconnectMin := cm.opts.ReconnectMin
+	reconnectMax := cm.opts.ReconnectMax
+	// safeguards for min/max
+	if reconnectMin <= 0 {
+		reconnectMin = defaultReconnectMin
+	}
+	if reconnectMax < reconnectMin {
+		reconnectMax = reconnectMin
+	}
 
-	go cm.monitor(conn)
+	// if auto-reconnect is disabled, try once and fail
+	if !autoReconnect {
+		conn, err := newConnection(cm.url, cm.opts.Config)
+		if err != nil {
+			return fmt.Errorf("%w: replace connection %d: %w", ErrConnectionManager, idx, err)
+		}
+		cm.pool[idx] = conn
+		go cm.monitor(conn)
+		return nil
+	}
 
-	return nil
+	attempt := 0
+	delay := reconnectMin
+
+	for {
+		if cm.closed.Load() {
+			return ErrConnectionManagerClosed
+		}
+		// guard against nil context (e.g., when called before init())
+		if cm.ctx != nil && cm.ctx.Err() != nil {
+			return fmt.Errorf("%w: replace connection %d: context cancelled: %w", ErrConnectionManager, idx, cm.ctx.Err())
+		}
+
+		attempt++
+		conn, err := newConnection(cm.url, cm.opts.Config)
+		if err == nil {
+			// success: install new connection and start monitoring
+			cm.pool[idx] = conn
+			go cm.monitor(conn)
+			return nil
+		}
+
+		// failed: exponential backoff with jitter
+		backoff := delay + time.Duration(rand.Int64N(int64(delay/4))) // +0-25% jitter
+
+		if cm.ctx != nil {
+			select {
+			case <-cm.ctx.Done():
+				return fmt.Errorf("%w: replace connection %d (attempt %d): context cancelled: %w", ErrConnectionManager, idx, attempt, cm.ctx.Err())
+			case <-time.After(backoff):
+				delay = min(delay*2, reconnectMax)
+			}
+		} else {
+			// no context available (e.g. replace called before init()), use simple sleep
+			time.Sleep(backoff)
+			delay = min(delay*2, reconnectMax)
+		}
+	}
 }
 
 // monitor starts watching a connection for close and block events, replacing it when necessary.
@@ -176,8 +268,8 @@ func (cm *connectionManager) monitor(conn *Connection) {
 	}
 
 	// call open handler if registered
-	if cm.opts.onOpen != nil {
-		go cm.opts.onOpen(idx)
+	if cm.opts.OnOpen != nil {
+		go cm.opts.OnOpen(idx)
 	}
 
 	// create a buffered channel to avoid deadlock
@@ -202,8 +294,8 @@ func (cm *connectionManager) monitor(conn *Connection) {
 				return // ignore: stale event for a replaced connection
 			}
 
-			if err != nil && cm.opts.onClose != nil {
-				go cm.opts.onClose(idx, err.Code, err.Reason, err.Server, err.Recover) // prevent blocking
+			if err != nil && cm.opts.OnClose != nil {
+				go cm.opts.OnClose(idx, err.Code, err.Reason, err.Server, err.Recover) // prevent blocking
 			}
 
 			// connection closed, attempt to replace it if manager is still open
@@ -220,8 +312,8 @@ func (cm *connectionManager) monitor(conn *Connection) {
 				return // ignore: stale event for a blocked connection
 			}
 
-			if cm.opts.onBlock != nil {
-				go cm.opts.onBlock(idx, block.Active, block.Reason) // prevent blocking
+			if cm.opts.OnBlock != nil {
+				go cm.opts.OnBlock(idx, block.Active, block.Reason) // prevent blocking
 			}
 		}
 	}
