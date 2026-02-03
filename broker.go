@@ -46,7 +46,7 @@ type Broker struct {
 
 	// connection manager for all connections
 	connectionMgr     *connectionManager
-	connectionMgrOpts connectionManagerOptions
+	connectionMgrOpts ConnectionManagerOptions
 
 	// topology manager for declared exchanges, queues, and bindings
 	topologyMgr *topologyManager
@@ -113,20 +113,6 @@ func WithCache(ttl time.Duration) BrokerOption {
 	}
 }
 
-// WithConnectionPoolSize sets the number of managed connections.
-// - Size 1: All operations share one connection
-// - Size 2: Publishers/Control use one, Consumers use another (recommended default)
-// - Size 3+: Dedicated connections for publishers, consumers, and control
-// Defaults to defaultConnPoolSize (1).
-func WithConnectionPoolSize(size int) BrokerOption {
-	return func(b *Broker) {
-		if size <= 0 {
-			size = defaultConnectionPoolSize
-		}
-		b.connectionMgrOpts.size = size
-	}
-}
-
 // WithEndpointOptions sets the default EndpointOptions for all endpoints (publishers/consumers).
 func WithEndpointOptions(opts EndpointOptions) BrokerOption {
 	return func(b *Broker) {
@@ -134,13 +120,38 @@ func WithEndpointOptions(opts EndpointOptions) BrokerOption {
 	}
 }
 
-// WithDialConfig sets the AMQP connection configuration.
+// WithConnectionManagerOptions sets the connection pool configuration.
+// This controls pool size, dial config, event handlers, and retry behavior.
+// Defaults are applied for any unspecified fields.
+func WithConnectionManagerOptions(opts ConnectionManagerOptions) BrokerOption {
+	return func(b *Broker) {
+		b.connectionMgrOpts = opts
+	}
+}
+
+
+// WithConnectionPoolSize sets the number of managed connections.
+// - Size 1: All operations share one connection
+// - Size 2: Publishers/Control use one, Consumers use another (recommended for most cases)
+// - Size 3+: Dedicated connections for publishers, consumers, and control
+// Defaults to defaultConnectionPoolSize (1).
+//
+// Deprecated: Use WithConnectionManagerOptions instead.
+func WithConnectionPoolSize(size int) BrokerOption {
+	return func(b *Broker) {
+		b.connectionMgrOpts.Size = size
+	}
+}
+
+// WithConnectionConfig sets the AMQP connection configuration.
 // This allows full control over connection parameters including TLS, SASL,
 // heartbeat, channel limits, frame size, vhost, and properties.
 // Defaults to none.
-func WithDialConfig(config Config) BrokerOption {
+//
+// Deprecated: Use WithConnectionManagerOptions instead.
+func WithConnectionConfig(config Config) BrokerOption {
 	return func(b *Broker) {
-		b.connectionMgrOpts.dialConfig = &config
+		b.connectionMgrOpts.Config = &config
 	}
 }
 
@@ -148,9 +159,11 @@ func WithDialConfig(config Config) BrokerOption {
 // The callback is invoked when a connection is successfully established or re-established.
 // Parameters: idx (which connection pool index)
 // Defaults to none.
+//
+// Deprecated: Use WithConnectionManagerOptions instead.
 func WithConnectionOnOpen(handler ConnectionOnOpenHandler) BrokerOption {
 	return func(b *Broker) {
-		b.connectionMgrOpts.onOpen = handler
+		b.connectionMgrOpts.OnOpen = handler
 	}
 }
 
@@ -159,9 +172,11 @@ func WithConnectionOnOpen(handler ConnectionOnOpenHandler) BrokerOption {
 // Parameters: idx (connection pool index), code (AMQP error code), reason (error description),
 // server (true if initiated by server), recover (true if recoverable).
 // Defaults to none.
+//
+// Deprecated: Use WithConnectionManagerOptions instead.
 func WithConnectionOnClose(handler ConnectionOnCloseHandler) BrokerOption {
 	return func(b *Broker) {
-		b.connectionMgrOpts.onClose = handler
+		b.connectionMgrOpts.OnClose = handler
 	}
 }
 
@@ -170,11 +185,33 @@ func WithConnectionOnClose(handler ConnectionOnCloseHandler) BrokerOption {
 // Parameters: idx (connection pool index), active (true=blocked, false=unblocked),
 // reason (only set when active=true).
 // Defaults to none.
+//
+// Deprecated: Use WithConnectionManagerOptions instead.
 func WithConnectionOnBlocked(handler ConnectionOnBlockHandler) BrokerOption {
 	return func(b *Broker) {
-		b.connectionMgrOpts.onBlock = handler
+		b.connectionMgrOpts.OnBlock = handler
 	}
 }
+
+// WithConnectionReconnectConfig sets the connection pool reconnection configuration.
+// This controls automatic reconnection behavior when connections fail.
+// Defaults to auto-reconnect enabled with 500ms min and 30s max backoff.
+//
+// Deprecated: Use WithConnectionManagerOptions instead. For example:
+//
+//	WithConnectionManagerOptions(ConnectionManagerOptions{
+//	    NoAutoReconnect: false,
+//	    ReconnectMin:    500 * time.Millisecond,
+//	    ReconnectMax:    30 * time.Second,
+//	})
+func WithConnectionReconnectConfig(noAutoReconnect bool, reconnectMin, reconnectMax time.Duration) BrokerOption {
+	return func(b *Broker) {
+		b.connectionMgrOpts.NoAutoReconnect = noAutoReconnect
+		b.connectionMgrOpts.ReconnectMin = reconnectMin
+		b.connectionMgrOpts.ReconnectMax = reconnectMax
+	}
+}
+
 
 // New creates a new Broker and establishes the initial control connection.
 // It starts a background goroutine to maintain the control connection.
@@ -188,25 +225,18 @@ func New(opts ...BrokerOption) (*Broker, error) {
 		cancel:     cancel,
 		publishers: make(map[string]Publisher),
 		consumers:  make(map[string]Consumer),
-		endpointOpts: EndpointOptions{
-			ReconnectMin: defaultReconnectMin,
-			ReconnectMax: defaultReconnectMax,
-			ReadyTimeout: defaultReadyTimeout,
-			// Add other sensible defaults as needed
-		},
-		cacheTTL: defaultCacheTTL,
+		cacheTTL:   defaultCacheTTL,
 	}
 
 	for _, opt := range opts {
 		opt(b)
 	}
 
-	if b.endpointOpts.ReconnectMin <= 0 {
-		return nil, fmt.Errorf("%w: min must be positive", ErrBrokerConfigInvalid)
-	}
-	if b.endpointOpts.ReconnectMax <= b.endpointOpts.ReconnectMin {
-		return nil, fmt.Errorf("%w: max must be greater than min", ErrBrokerConfigInvalid)
-	}
+	// merge endpoint options with defaults
+	b.endpointOpts = mergeEndpointOptions(b.endpointOpts, defaultEndpointOptions())
+
+	// merge connection manager options with defaults
+	b.connectionMgrOpts = mergeConnectionManagerOptions(b.connectionMgrOpts, defaultConnectionManagerOptions())
 
 	b.connectionMgr = newConnectionManager(b.url, &b.connectionMgrOpts)
 	// initialize all managed connections
