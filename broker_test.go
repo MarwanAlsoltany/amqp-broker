@@ -61,30 +61,38 @@ func TestBrokerOptions(t *testing.T) {
 		assert.Equal(t, time.Duration(0), b.cacheTTL)
 	})
 
-	t.Run("WithConnectionPoolSize", func(t *testing.T) {
+	t.Run("WithConnectionManagerOptions", func(t *testing.T) {
 		b := &Broker{}
-		// valid size
-		WithConnectionPoolSize(3)(b)
-		assert.Equal(t, 3, b.connectionMgrOpts.size)
-		// zero uses default
-		WithConnectionPoolSize(0)(b)
-		assert.Equal(t, defaultConnectionPoolSize, b.connectionMgrOpts.size)
-		// negative uses default
-		WithConnectionPoolSize(-5)(b)
-		assert.Equal(t, defaultConnectionPoolSize, b.connectionMgrOpts.size)
-	})
 
-	t.Run("WithConnectionHandlers", func(t *testing.T) {
-		b := &Broker{}
+		t.Run("PoolSize", func(t *testing.T) {
+			opts := ConnectionManagerOptions{Size: 3}
+			WithConnectionManagerOptions(opts)(b)
+			assert.Equal(t, 3, b.connectionMgrOpts.Size)
+		})
+
+		t.Run("ConnectionConfig", func(t *testing.T) {
+			config := Config{
+				Heartbeat: 30 * time.Second,
+				Locale:    "en_US",
+				Vhost:     "/custom",
+			}
+			opts := ConnectionManagerOptions{Config: &config}
+			WithConnectionManagerOptions(opts)(b)
+			require.NotNil(t, b.connectionMgrOpts.Config)
+			assert.Equal(t, 30*time.Second, b.connectionMgrOpts.Config.Heartbeat)
+			assert.Equal(t, "en_US", b.connectionMgrOpts.Config.Locale)
+			assert.Equal(t, "/custom", b.connectionMgrOpts.Config.Vhost)
+		})
 
 		t.Run("OnOpen", func(t *testing.T) {
 			var capturedIdx int
 			handler := func(idx int) {
 				capturedIdx = idx
 			}
-			WithConnectionOnOpen(handler)(b)
+			opts := ConnectionManagerOptions{OnOpen: handler}
+			WithConnectionManagerOptions(opts)(b)
 
-			b.connectionMgrOpts.onOpen(3)
+			b.connectionMgrOpts.OnOpen(3)
 			assert.Equal(t, 3, capturedIdx)
 		})
 
@@ -100,9 +108,10 @@ func TestBrokerOptions(t *testing.T) {
 				capturedServer = server
 				capturedRecover = recover
 			}
-			WithConnectionOnClose(handler)(b)
+			opts := ConnectionManagerOptions{OnClose: handler}
+			WithConnectionManagerOptions(opts)(b)
 
-			b.connectionMgrOpts.onClose(2, 404, "NOT_FOUND", true, false)
+			b.connectionMgrOpts.OnClose(2, 404, "NOT_FOUND", true, false)
 			assert.Equal(t, 2, capturedIdx)
 			assert.Equal(t, 404, capturedCode)
 			assert.Equal(t, "NOT_FOUND", capturedReason)
@@ -121,12 +130,25 @@ func TestBrokerOptions(t *testing.T) {
 				capturedReason = reason
 			}
 
-			WithConnectionOnBlocked(handler)(b)
+			opts := ConnectionManagerOptions{OnBlock: handler}
+			WithConnectionManagerOptions(opts)(b)
 
-			b.connectionMgrOpts.onBlock(1, true, "alarm")
+			b.connectionMgrOpts.OnBlock(1, true, "alarm")
 			assert.Equal(t, 1, capturedIdx)
 			assert.True(t, capturedActive)
 			assert.Equal(t, "alarm", capturedReason)
+		})
+
+		t.Run("ReconnectConfig", func(t *testing.T) {
+			opts := ConnectionManagerOptions{
+				NoAutoReconnect: true,
+				ReconnectMin:    1 * time.Second,
+				ReconnectMax:    10 * time.Second,
+			}
+			WithConnectionManagerOptions(opts)(b)
+			assert.True(t, b.connectionMgrOpts.NoAutoReconnect)
+			assert.Equal(t, 1*time.Second, b.connectionMgrOpts.ReconnectMin)
+			assert.Equal(t, 10*time.Second, b.connectionMgrOpts.ReconnectMax)
 		})
 	})
 
@@ -148,19 +170,86 @@ func TestBrokerOptions(t *testing.T) {
 		assert.Equal(t, 10*time.Second, b.endpointOpts.ReconnectMax)
 	})
 
-	t.Run("WithDialConfig", func(t *testing.T) {
+	t.Run("WithConnectionPoolSize", func(t *testing.T) {
 		b := &Broker{}
+		WithConnectionPoolSize(3)(b)
+		assert.Equal(t, 3, b.connectionMgrOpts.Size)
+	})
 
+	t.Run("WithConnectionConfig", func(t *testing.T) {
+		b := &Broker{}
 		config := Config{
 			Heartbeat: 30 * time.Second,
 			Locale:    "en_US",
 			Vhost:     "/custom",
 		}
-		WithDialConfig(config)(b)
-		require.NotNil(t, b.connectionMgrOpts.dialConfig)
-		assert.Equal(t, 30*time.Second, b.connectionMgrOpts.dialConfig.Heartbeat)
-		assert.Equal(t, "en_US", b.connectionMgrOpts.dialConfig.Locale)
-		assert.Equal(t, "/custom", b.connectionMgrOpts.dialConfig.Vhost)
+		WithConnectionConfig(config)(b)
+		require.NotNil(t, b.connectionMgrOpts.Config)
+		assert.Equal(t, 30*time.Second, b.connectionMgrOpts.Config.Heartbeat)
+		assert.Equal(t, "en_US", b.connectionMgrOpts.Config.Locale)
+		assert.Equal(t, "/custom", b.connectionMgrOpts.Config.Vhost)
+	})
+
+	t.Run("WithConnectionOnOpen", func(t *testing.T) {
+		b := &Broker{}
+		var capturedIdx int
+		handler := func(idx int) {
+			capturedIdx = idx
+		}
+		WithConnectionOnOpen(handler)(b)
+
+		b.connectionMgrOpts.OnOpen(3)
+		assert.Equal(t, 3, capturedIdx)
+	})
+
+	t.Run("WithConnectionOnClose", func(t *testing.T) {
+		b := &Broker{}
+		var capturedIdx, capturedCode int
+		var capturedReason string
+		var capturedServer, capturedRecover bool
+
+		handler := func(idx, code int, reason string, server, recover bool) {
+			capturedIdx = idx
+			capturedCode = code
+			capturedReason = reason
+			capturedServer = server
+			capturedRecover = recover
+		}
+		WithConnectionOnClose(handler)(b)
+
+		b.connectionMgrOpts.OnClose(2, 404, "NOT_FOUND", true, false)
+		assert.Equal(t, 2, capturedIdx)
+		assert.Equal(t, 404, capturedCode)
+		assert.Equal(t, "NOT_FOUND", capturedReason)
+		assert.True(t, capturedServer)
+		assert.False(t, capturedRecover)
+	})
+
+	t.Run("WithConnectionOnBlocked", func(t *testing.T) {
+		b := &Broker{}
+		var capturedIdx int
+		var capturedActive bool
+		var capturedReason string
+
+		handler := func(idx int, active bool, reason string) {
+			capturedIdx = idx
+			capturedActive = active
+			capturedReason = reason
+		}
+		WithConnectionOnBlocked(handler)(b)
+
+		b.connectionMgrOpts.OnBlock(1, true, "alarm")
+		assert.Equal(t, 1, capturedIdx)
+		assert.True(t, capturedActive)
+		assert.Equal(t, "alarm", capturedReason)
+	})
+
+	t.Run("WithConnectionReconnectConfig", func(t *testing.T) {
+		b := &Broker{}
+		WithConnectionReconnectConfig(true, 2*time.Second, 20*time.Second)(b)
+		assert.True(t, b.connectionMgrOpts.NoAutoReconnect)
+		assert.Equal(t, 2*time.Second, b.connectionMgrOpts.ReconnectMin)
+		assert.Equal(t, 20*time.Second, b.connectionMgrOpts.ReconnectMax)
 	})
 
 	t.Run("Behavior", func(t *testing.T) {
@@ -177,7 +266,7 @@ func TestBrokerOptions(t *testing.T) {
 			opts := []BrokerOption{
 				WithURL(customURL),
 				WithIdentifier(customID),
-				WithConnectionPoolSize(poolSize),
+				WithConnectionManagerOptions(ConnectionManagerOptions{Size: poolSize}),
 				WithEndpointOptions(EndpointOptions{ReconnectMin: min, ReconnectMax: max}),
 				WithCache(cacheTTL),
 			}
@@ -188,7 +277,7 @@ func TestBrokerOptions(t *testing.T) {
 
 			assert.Equal(t, customURL, b.url)
 			assert.Equal(t, customID, b.id)
-			assert.Equal(t, poolSize, b.connectionMgrOpts.size)
+			assert.Equal(t, poolSize, b.connectionMgrOpts.Size)
 			assert.Equal(t, min, b.endpointOpts.ReconnectMin)
 			assert.Equal(t, max, b.endpointOpts.ReconnectMax)
 			assert.Equal(t, cacheTTL, b.cacheTTL)
@@ -217,76 +306,16 @@ func TestBrokerOptions(t *testing.T) {
 			WithIdentifier("new")(b)
 			assert.Equal(t, "new", b.id)
 
-			WithConnectionPoolSize(1)(b)
-			WithConnectionPoolSize(5)(b)
-			assert.Equal(t, 5, b.connectionMgrOpts.size)
+			WithConnectionManagerOptions(ConnectionManagerOptions{Size: 1})(b)
+			WithConnectionManagerOptions(ConnectionManagerOptions{Size: 5})(b)
+			assert.Equal(t, 5, b.connectionMgrOpts.Size)
 		})
 	})
 }
 
 func TestBrokerNew(t *testing.T) {
-	b, err := New()
-	assert.Nil(t, b)
-	assert.Error(t, err)
-	assert.ErrorIs(t, err, ErrBroker)
-
-	t.Run("Validation", func(t *testing.T) {
-		t.Run("ReconnectMinZero", func(t *testing.T) {
-			b, err := New(
-				WithEndpointOptions(
-					EndpointOptions{
-						ReconnectMin: 0,
-						ReconnectMax: 10 * time.Second,
-					},
-				),
-			)
-			assert.Nil(t, b)
-			assert.ErrorIs(t, err, ErrBrokerConfigInvalid)
-			assert.Contains(t, err.Error(), "min must be positive")
-		})
-
-		t.Run("ReconnectMinNegative", func(t *testing.T) {
-			b, err := New(
-				WithEndpointOptions(
-					EndpointOptions{
-						ReconnectMin: -1 * time.Second,
-						ReconnectMax: 10 * time.Second,
-					},
-				),
-			)
-			assert.Nil(t, b)
-			assert.ErrorIs(t, err, ErrBrokerConfigInvalid)
-			assert.Contains(t, err.Error(), "min must be positive")
-		})
-
-		t.Run("ReconnectMaxLessThanMin", func(t *testing.T) {
-			b, err := New(
-				WithEndpointOptions(
-					EndpointOptions{
-						ReconnectMin: 5 * time.Second,
-						ReconnectMax: 2 * time.Second,
-					},
-				),
-			)
-			assert.Nil(t, b)
-			assert.ErrorIs(t, err, ErrBrokerConfigInvalid)
-			assert.Contains(t, err.Error(), "max must be greater than min")
-		})
-
-		t.Run("ReconnectMaxEqualToMin", func(t *testing.T) {
-			b, err := New(
-				WithEndpointOptions(
-					EndpointOptions{
-						ReconnectMin: 5 * time.Second,
-						ReconnectMax: 5 * time.Second,
-					},
-				),
-			)
-			assert.Nil(t, b)
-			assert.ErrorIs(t, err, ErrBrokerConfigInvalid)
-			assert.Contains(t, err.Error(), "max must be greater than min")
-		})
-	})
+	// Note: Endpoint option validation has been moved to publisher/consumer init()
+	// so New() no longer returns errors for invalid endpoint options
 }
 
 func TestBrokerClose(t *testing.T) {
@@ -338,7 +367,7 @@ func TestBrokerClose(t *testing.T) {
 		}
 
 		// create a real connection manager (won't actually connect)
-		b.connectionMgr = newConnectionManager(testURL, &connectionManagerOptions{size: 1})
+		b.connectionMgr = newConnectionManager(testURL, &ConnectionManagerOptions{Size: 1})
 		// initialize context in connection manager
 		connCtx, connCancel := context.WithCancel(ctx)
 		b.connectionMgr.ctx = connCtx
@@ -443,7 +472,7 @@ func TestBrokerConnection(t *testing.T) {
 
 		b := &Broker{
 			ctx:           ctx,
-			connectionMgr: newConnectionManager(testURL, &connectionManagerOptions{size: 1}),
+			connectionMgr: newConnectionManager(testURL, &ConnectionManagerOptions{Size: 1}),
 		}
 		defer b.Close()
 
@@ -461,7 +490,7 @@ func TestBrokerConnection(t *testing.T) {
 
 		b := &Broker{
 			ctx:           ctx,
-			connectionMgr: newConnectionManager(testURL, &connectionManagerOptions{size: 1}),
+			connectionMgr: newConnectionManager(testURL, &ConnectionManagerOptions{Size: 1}),
 		}
 		b.Close()
 
@@ -483,7 +512,7 @@ func TestBrokerChannel(t *testing.T) {
 
 		b := &Broker{
 			ctx:           ctx,
-			connectionMgr: newConnectionManager(testURL, &connectionManagerOptions{size: 1}),
+			connectionMgr: newConnectionManager(testURL, &ConnectionManagerOptions{Size: 1}),
 		}
 		defer b.Close()
 
@@ -508,7 +537,7 @@ func TestBrokerChannel(t *testing.T) {
 
 		b := &Broker{
 			ctx:           ctx,
-			connectionMgr: newConnectionManager(testURL, &connectionManagerOptions{size: 1}),
+			connectionMgr: newConnectionManager(testURL, &ConnectionManagerOptions{Size: 1}),
 		}
 
 		// initialize will fail due to not being able to connect
@@ -531,7 +560,7 @@ func TestBrokerDeclare(t *testing.T) {
 		b := &Broker{
 			ctx:           ctx,
 			topologyMgr:   newTopologyManager(),
-			connectionMgr: newConnectionManager(testURL, &connectionManagerOptions{size: 1}),
+			connectionMgr: newConnectionManager(testURL, &ConnectionManagerOptions{Size: 1}),
 		}
 
 		// initialize will fail due to not being able to connect
@@ -555,7 +584,7 @@ func TestBrokerDelete(t *testing.T) {
 		b := &Broker{
 			ctx:           ctx,
 			topologyMgr:   newTopologyManager(),
-			connectionMgr: newConnectionManager(testURL, &connectionManagerOptions{size: 1}),
+			connectionMgr: newConnectionManager(testURL, &ConnectionManagerOptions{Size: 1}),
 		}
 
 		// initialize will fail due to not being able to connect
@@ -579,7 +608,7 @@ func TestBrokerVerify(t *testing.T) {
 		b := &Broker{
 			ctx:           ctx,
 			topologyMgr:   newTopologyManager(),
-			connectionMgr: newConnectionManager(testURL, &connectionManagerOptions{size: 1}),
+			connectionMgr: newConnectionManager(testURL, &ConnectionManagerOptions{Size: 1}),
 		}
 
 		// initialize will fail due to not being able to connect
@@ -603,7 +632,7 @@ func TestBrokerSync(t *testing.T) {
 		b := &Broker{
 			ctx:           ctx,
 			topologyMgr:   newTopologyManager(),
-			connectionMgr: newConnectionManager(testURL, &connectionManagerOptions{size: 1}),
+			connectionMgr: newConnectionManager(testURL, &ConnectionManagerOptions{Size: 1}),
 		}
 
 		// initialize will fail due to not being able to connect
@@ -628,7 +657,7 @@ func TestBrokerNewPublisher(t *testing.T) {
 			publishers:  make(map[string]Publisher),
 			topologyMgr: newTopologyManager(),
 			// create a connection manager that will fail to connect
-			connectionMgr: newConnectionManager(testURL, &connectionManagerOptions{size: 1}),
+			connectionMgr: newConnectionManager(testURL, &ConnectionManagerOptions{Size: 1}),
 		}
 		defer b.Close()
 
@@ -674,7 +703,7 @@ func TestBrokerNewConsumer(t *testing.T) {
 			consumers:   make(map[string]Consumer),
 			topologyMgr: newTopologyManager(),
 			// create a connection manager that will fail to connect
-			connectionMgr: newConnectionManager(testURL, &connectionManagerOptions{size: 1}),
+			connectionMgr: newConnectionManager(testURL, &ConnectionManagerOptions{Size: 1}),
 		}
 		defer b.Close()
 
@@ -722,7 +751,7 @@ func TestBrokerPublish(t *testing.T) {
 			publishers:  make(map[string]Publisher),
 			topologyMgr: newTopologyManager(),
 			// create a connection manager that will fail to connect
-			connectionMgr: newConnectionManager(testURL, &connectionManagerOptions{size: 1}),
+			connectionMgr: newConnectionManager(testURL, &ConnectionManagerOptions{Size: 1}),
 		}
 		defer b.Close()
 
@@ -746,7 +775,7 @@ func TestBrokerPublish(t *testing.T) {
 			publishersPool: newPool[Publisher](1 * time.Minute),
 			topologyMgr:    newTopologyManager(),
 			// create a connection manager that will fail to connect
-			connectionMgr: newConnectionManager(testURL, &connectionManagerOptions{size: 1}),
+			connectionMgr: newConnectionManager(testURL, &ConnectionManagerOptions{Size: 1}),
 		}
 
 		_ = b.publishersPool.init(ctx)
@@ -779,7 +808,7 @@ func TestBrokerConsume(t *testing.T) {
 			consumers:   make(map[string]Consumer),
 			topologyMgr: newTopologyManager(),
 			// create a connection manager that will fail to connect
-			connectionMgr: newConnectionManager(testURL, &connectionManagerOptions{size: 1}),
+			connectionMgr: newConnectionManager(testURL, &ConnectionManagerOptions{Size: 1}),
 		}
 		defer b.Close()
 
@@ -809,7 +838,7 @@ func TestBrokerTransaction(t *testing.T) {
 
 		b := &Broker{
 			ctx:           ctx,
-			connectionMgr: newConnectionManager(testURL, &connectionManagerOptions{size: 1}),
+			connectionMgr: newConnectionManager(testURL, &ConnectionManagerOptions{Size: 1}),
 		}
 
 		// initialize will fail due to not being able to connect
