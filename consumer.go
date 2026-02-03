@@ -261,6 +261,10 @@ var _ endpointLifecycle = (*consumer)(nil)
 
 // init initializes the consumer's endpoint lifecycle.
 func (c *consumer) init(ctx context.Context) error {
+	if err := validateConsumerOptions(c.opts); err != nil {
+		return fmt.Errorf("%w: %w", ErrConsumer, err)
+	}
+
 	return c.endpoint.start(ctx, c, c.opts.OnError)
 }
 

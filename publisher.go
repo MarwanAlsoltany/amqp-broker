@@ -248,6 +248,10 @@ var _ endpointLifecycle = (*publisher)(nil)
 
 // init initializes the publisher's endpoint lifecycle.
 func (p *publisher) init(ctx context.Context) error {
+	if err := validatePublisherOptions(p.opts); err != nil {
+		return fmt.Errorf("%w: %w", ErrPublisher, err)
+	}
+
 	return p.endpoint.start(ctx, p, p.opts.OnError)
 }
 
