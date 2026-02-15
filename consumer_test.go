@@ -17,6 +17,7 @@ func TestConsumerOptions(t *testing.T) {
 	assert.Equal(t, defaultPrefetchCount, opts.PrefetchCount)
 	assert.False(t, opts.NoWait)
 	assert.False(t, opts.Exclusive)
+	assert.False(t, opts.NoAutoDeclare)
 	assert.False(t, opts.NoWaitReady)
 	assert.Equal(t, defaultReadyTimeout, opts.ReadyTimeout)
 	assert.False(t, opts.NoAutoReconnect)

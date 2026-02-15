@@ -97,6 +97,7 @@ func TestMergeEndpointOptions(t *testing.T) {
 			ReconnectMin:    1 * time.Second,
 			ReconnectMax:    5 * time.Second,
 			ReadyTimeout:    7 * time.Second,
+			NoAutoDeclare:   true,
 			NoAutoReconnect: true,
 			NoWaitReady:     true,
 		}
@@ -104,6 +105,7 @@ func TestMergeEndpointOptions(t *testing.T) {
 		assert.Equal(t, 1*time.Second, merged.ReconnectMin)
 		assert.Equal(t, 5*time.Second, merged.ReconnectMax)
 		assert.Equal(t, 7*time.Second, merged.ReadyTimeout)
+		assert.True(t, merged.NoAutoDeclare)
 		assert.True(t, merged.NoAutoReconnect)
 		assert.True(t, merged.NoWaitReady)
 	})

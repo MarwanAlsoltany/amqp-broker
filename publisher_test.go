@@ -16,6 +16,7 @@ func TestPublisherOptions(t *testing.T) {
 	assert.Equal(t, defaultConfirmTimeout, opts.ConfirmTimeout)
 	assert.False(t, opts.Mandatory)
 	assert.False(t, opts.Immediate)
+	assert.False(t, opts.NoAutoDeclare)
 	assert.False(t, opts.NoWaitReady)
 	assert.Equal(t, defaultReadyTimeout, opts.ReadyTimeout)
 	assert.False(t, opts.NoAutoReconnect)
