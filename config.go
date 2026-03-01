@@ -117,6 +117,7 @@ func validateConnectionManagerOptions(opts ConnectionManagerOptions) error {
 // defaultEndpointOptions returns EndpointOptions with defaults applied.
 func defaultEndpointOptions() EndpointOptions {
 	return EndpointOptions{
+		NoAutoDeclare:   false,
 		NoAutoReconnect: false,
 		ReconnectMin:    defaultReconnectMin,
 		ReconnectMax:    defaultReconnectMax,

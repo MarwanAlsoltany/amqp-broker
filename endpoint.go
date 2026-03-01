@@ -53,6 +53,15 @@ type Endpoint interface {
 // EndpointOptions holds common reconnection and readiness configuration
 // for endpoints (publishers/consumers).
 type EndpointOptions struct {
+	// NoAutoDeclare disables automatic declaration of topology (exchanges, queues, and bindings) for an endpoint.
+	// This setting is relevant for publishers and consumers that want to manage topology declaration manually
+	// by declaring on demand or by relying on external side effects for declaration.
+	// Default: false (automatic declaration enabled)
+	//
+	// Note: If NoAutoDeclare is set to true, the caller must ensure that the necessary exchanges, queues,
+	// and bindings are declared for an endpoint before the endpoint attempts to use them. Failure to do so
+	// may result in errors during connection (and when publishing or consuming messages) due to missing topology.
+	NoAutoDeclare bool
 	// NoAutoReconnect disables automatic reconnection on connection failure.
 	// Default: false
 	NoAutoReconnect bool
