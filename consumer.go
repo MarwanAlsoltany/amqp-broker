@@ -286,10 +286,12 @@ func (c *consumer) connect(ctx context.Context) error {
 	c.ch = ch
 	c.stateMu.Unlock()
 
-	// declare queue (or redeclare upon reconnection)
-	err = c.Queue(c.queue)
-	if err != nil {
-		return err
+	if !c.opts.NoAutoDeclare {
+		// declare queue (or redeclare upon reconnection)
+		err = c.Queue(c.queue)
+		if err != nil {
+			return err
+		}
 	}
 
 	// set QoS

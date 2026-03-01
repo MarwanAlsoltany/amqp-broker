@@ -273,13 +273,15 @@ func (p *publisher) connect(ctx context.Context) error {
 	p.ch = ch
 	p.stateMu.Unlock()
 
-	// declare exchange (or redeclare upon reconnection)
-	err = p.Exchange(p.exchange)
-	if err != nil {
-		// allow bypassing validation error without failing
-		// (when routing-key == queue), i.e. using "amq.direct"
-		if !errors.Is(err, ErrTopologyExchangeNameEmpty) {
-			return err
+	if !p.opts.NoAutoDeclare {
+		// declare exchange (or redeclare upon reconnection)
+		err = p.Exchange(p.exchange)
+		if err != nil {
+			// allow bypassing validation error without failing
+			// (when routing-key == queue), i.e. using "amq.direct"
+			if !errors.Is(err, ErrTopologyExchangeNameEmpty) {
+				return err
+			}
 		}
 	}
 
