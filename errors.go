@@ -77,15 +77,6 @@ func (e *Error) Error() string {
 		if err == nil {
 			return "<nil>"
 		}
-		// if underlying is amqp.Error, format specially
-		if amqpErr, ok := err.(*amqp.Error); ok && amqpErr != nil {
-			source := "client"
-			if amqpErr.Server {
-				source = "server"
-			}
-			return fmt.Sprintf("%s (source=%s, code=%d, recoverable=%v)",
-				amqpErr.Reason, source, amqpErr.Code, amqpErr.Recover)
-		}
 		// if underlying implements interface{ Unwrap() []error }
 		// (e.g. errors.Join result), format children compactly (no newlines)
 		if joinedErr, ok := err.(interface{ Unwrap() []error }); ok {
@@ -95,6 +86,15 @@ func (e *Error) Error() string {
 				parts = append(parts, format(err))
 			}
 			return strings.Join(parts, "; ")
+		}
+		// if underlying is amqp.Error, format specially
+		if amqpErr, ok := err.(*amqp.Error); ok && amqpErr != nil {
+			source := "client"
+			if amqpErr.Server {
+				source = "server"
+			}
+			return fmt.Sprintf("%s (source=%s, code=%d, recoverable=%v)",
+				amqpErr.Reason, source, amqpErr.Code, amqpErr.Recover)
 		}
 		// more cases as needed ...
 		return err.Error()
