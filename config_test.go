@@ -81,6 +81,128 @@ func TestDefaultsConstants(t *testing.T) {
 	})
 }
 
+func TestValidateTimeBounds(t *testing.T) {
+	t.Run("ValidBounds", func(t *testing.T) {
+		err := validateTimeBounds(1*time.Second, 10*time.Second)
+		assert.NoError(t, err)
+	})
+
+	t.Run("MinIsZero", func(t *testing.T) {
+		err := validateTimeBounds(0, 10*time.Second)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "min must be greater than zero")
+	})
+
+	t.Run("MinIsNegative", func(t *testing.T) {
+		err := validateTimeBounds(-1*time.Second, 10*time.Second)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "min must be greater than zero")
+	})
+
+	t.Run("MaxEqualsMin", func(t *testing.T) {
+		err := validateTimeBounds(5*time.Second, 5*time.Second)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "max must be greater than min")
+	})
+
+	t.Run("MaxLessThanMin", func(t *testing.T) {
+		err := validateTimeBounds(10*time.Second, 5*time.Second)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "max must be greater than min")
+	})
+}
+
+func TestMergeConnectionManagerOptions(t *testing.T) {
+	defaults := defaultConnectionManagerOptions()
+
+	t.Run("MergesZeroValues", func(t *testing.T) {
+		overrides := ConnectionManagerOptions{}
+		merged := mergeConnectionManagerOptions(overrides, defaults)
+		assert.Equal(t, defaults.Size, merged.Size)
+		assert.Equal(t, defaults.ReconnectMin, merged.ReconnectMin)
+		assert.Equal(t, defaults.ReconnectMax, merged.ReconnectMax)
+	})
+
+	t.Run("KeepsOverrideValues", func(t *testing.T) {
+		overrides := ConnectionManagerOptions{
+			Size:         3,
+			ReconnectMin: 1 * time.Second,
+			ReconnectMax: 5 * time.Second,
+		}
+		merged := mergeConnectionManagerOptions(overrides, defaults)
+		assert.Equal(t, 3, merged.Size)
+		assert.Equal(t, 1*time.Second, merged.ReconnectMin)
+		assert.Equal(t, 5*time.Second, merged.ReconnectMax)
+	})
+}
+
+func TestValidateConnectionManagerOptions(t *testing.T) {
+	t.Run("ValidOptions", func(t *testing.T) {
+		opts := ConnectionManagerOptions{
+			Size:         2,
+			ReconnectMin: 1 * time.Second,
+			ReconnectMax: 10 * time.Second,
+		}
+		err := validateConnectionManagerOptions(opts)
+		assert.NoError(t, err)
+	})
+
+	t.Run("ZeroPoolSize", func(t *testing.T) {
+		opts := ConnectionManagerOptions{
+			Size:         0,
+			ReconnectMin: 1 * time.Second,
+			ReconnectMax: 10 * time.Second,
+		}
+		err := validateConnectionManagerOptions(opts)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "pool size must be positive")
+	})
+
+	t.Run("NegativePoolSize", func(t *testing.T) {
+		opts := ConnectionManagerOptions{
+			Size:         -1,
+			ReconnectMin: 1 * time.Second,
+			ReconnectMax: 10 * time.Second,
+		}
+		err := validateConnectionManagerOptions(opts)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "pool size must be positive")
+	})
+
+	t.Run("InvalidReconnectMinZero", func(t *testing.T) {
+		opts := ConnectionManagerOptions{
+			Size:         2,
+			ReconnectMin: 0,
+			ReconnectMax: 10 * time.Second,
+		}
+		err := validateConnectionManagerOptions(opts)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "reconnect")
+	})
+
+	t.Run("InvalidReconnectBoundsMaxLessThanMin", func(t *testing.T) {
+		opts := ConnectionManagerOptions{
+			Size:         2,
+			ReconnectMin: 10 * time.Second,
+			ReconnectMax: 5 * time.Second,
+		}
+		err := validateConnectionManagerOptions(opts)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "reconnect")
+	})
+
+	t.Run("InvalidReconnectBoundsMaxEqualsMin", func(t *testing.T) {
+		opts := ConnectionManagerOptions{
+			Size:         2,
+			ReconnectMin: 5 * time.Second,
+			ReconnectMax: 5 * time.Second,
+		}
+		err := validateConnectionManagerOptions(opts)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "reconnect")
+	})
+}
+
 func TestMergeEndpointOptions(t *testing.T) {
 	defaults := defaultEndpointOptions()
 
@@ -111,6 +233,48 @@ func TestMergeEndpointOptions(t *testing.T) {
 	})
 }
 
+func TestValidateEndpointOptions(t *testing.T) {
+	t.Run("ValidOptions", func(t *testing.T) {
+		opts := EndpointOptions{
+			ReconnectMin: 1 * time.Second,
+			ReconnectMax: 10 * time.Second,
+			ReadyTimeout: 5 * time.Second,
+		}
+		err := validateEndpointOptions(opts)
+		assert.NoError(t, err)
+	})
+
+	t.Run("InvalidReconnectMinZero", func(t *testing.T) {
+		opts := EndpointOptions{
+			ReconnectMin: 0,
+			ReconnectMax: 10 * time.Second,
+		}
+		err := validateEndpointOptions(opts)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "reconnect")
+	})
+
+	t.Run("InvalidReconnectBoundsMaxLessThanMin", func(t *testing.T) {
+		opts := EndpointOptions{
+			ReconnectMin: 10 * time.Second,
+			ReconnectMax: 5 * time.Second,
+		}
+		err := validateEndpointOptions(opts)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "reconnect")
+	})
+
+	t.Run("ZeroReadyTimeoutIsValid", func(t *testing.T) {
+		opts := EndpointOptions{
+			ReconnectMin: 1 * time.Second,
+			ReconnectMax: 10 * time.Second,
+			ReadyTimeout: 0, // valid, means no timeout
+		}
+		err := validateEndpointOptions(opts)
+		assert.NoError(t, err)
+	})
+}
+
 func TestMergePublisherOptions(t *testing.T) {
 	defaults := defaultPublisherOptions()
 
@@ -135,6 +299,44 @@ func TestMergePublisherOptions(t *testing.T) {
 		assert.True(t, merged.ConfirmMode)
 		assert.True(t, merged.Mandatory)
 		assert.True(t, merged.Immediate)
+	})
+}
+
+func TestValidatePublisherOptions(t *testing.T) {
+	t.Run("ValidOptions", func(t *testing.T) {
+		opts := PublisherOptions{
+			EndpointOptions: EndpointOptions{
+				ReconnectMin: 1 * time.Second,
+				ReconnectMax: 10 * time.Second,
+			},
+			ConfirmTimeout: 5 * time.Second,
+		}
+		err := validatePublisherOptions(opts)
+		assert.NoError(t, err)
+	})
+
+	t.Run("InvalidEndpointOptions", func(t *testing.T) {
+		opts := PublisherOptions{
+			EndpointOptions: EndpointOptions{
+				ReconnectMin: 0,
+				ReconnectMax: 10 * time.Second,
+			},
+		}
+		err := validatePublisherOptions(opts)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "reconnect")
+	})
+
+	t.Run("ZeroConfirmTimeoutIsValid", func(t *testing.T) {
+		opts := PublisherOptions{
+			EndpointOptions: EndpointOptions{
+				ReconnectMin: 1 * time.Second,
+				ReconnectMax: 10 * time.Second,
+			},
+			ConfirmTimeout: 0, // valid, user can set explicit zero
+		}
+		err := validatePublisherOptions(opts)
+		assert.NoError(t, err)
 	})
 }
 
@@ -165,5 +367,56 @@ func TestMergeConsumerOptions(t *testing.T) {
 		assert.True(t, merged.AutoAck)
 		assert.True(t, merged.NoWait)
 		assert.True(t, merged.Exclusive)
+	})
+}
+
+func TestValidateConsumerOptions(t *testing.T) {
+	t.Run("ValidOptions", func(t *testing.T) {
+		opts := ConsumerOptions{
+			EndpointOptions: EndpointOptions{
+				ReconnectMin: 1 * time.Second,
+				ReconnectMax: 10 * time.Second,
+			},
+			PrefetchCount:         10,
+			MaxConcurrentHandlers: 5,
+		}
+		err := validateConsumerOptions(opts)
+		assert.NoError(t, err)
+	})
+
+	t.Run("InvalidEndpointOptions", func(t *testing.T) {
+		opts := ConsumerOptions{
+			EndpointOptions: EndpointOptions{
+				ReconnectMin: 10 * time.Second,
+				ReconnectMax: 5 * time.Second,
+			},
+		}
+		err := validateConsumerOptions(opts)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "reconnect")
+	})
+
+	t.Run("ZeroPrefetchCountIsValid", func(t *testing.T) {
+		opts := ConsumerOptions{
+			EndpointOptions: EndpointOptions{
+				ReconnectMin: 1 * time.Second,
+				ReconnectMax: 10 * time.Second,
+			},
+			PrefetchCount: 0, // valid, user can set explicit zero
+		}
+		err := validateConsumerOptions(opts)
+		assert.NoError(t, err)
+	})
+
+	t.Run("ZeroMaxConcurrentHandlersIsValid", func(t *testing.T) {
+		opts := ConsumerOptions{
+			EndpointOptions: EndpointOptions{
+				ReconnectMin: 1 * time.Second,
+				ReconnectMax: 10 * time.Second,
+			},
+			MaxConcurrentHandlers: 0, // valid, means unlimited
+		}
+		err := validateConsumerOptions(opts)
+		assert.NoError(t, err)
 	})
 }
