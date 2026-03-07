@@ -102,7 +102,7 @@ func TestConnectionManagerInit(t *testing.T) {
 		assert.ErrorIs(t, err, context.Canceled)
 	})
 
-	t.Run("WithDialConfig", func(t *testing.T) {
+	t.Run("WithConnectionConfig", func(t *testing.T) {
 		cm := newConnectionManager(testURL, &ConnectionManagerOptions{
 			Size: 2,
 			Config: &amqp.Config{
@@ -269,7 +269,10 @@ func TestConnectionManagerReplace(t *testing.T) {
 	})
 
 	t.Run("WhenConnectionFails", func(t *testing.T) {
-		cm := newConnectionManager(testURL, &ConnectionManagerOptions{Size: 2})
+		cm := newConnectionManager(testURL, &ConnectionManagerOptions{
+			Size:            2,
+			NoAutoReconnect: true, // disable retries for immediate failure
+		})
 
 		err := cm.replace(0)
 		assert.Error(t, err)
