@@ -15,7 +15,7 @@ VERSION ?= latest
 .DEFAULT_GOAL := help
 
 .PHONY: help \
-	build test test-coverage lint format tidy clean
+	build test test-coverage test-integration lint format tidy clean
 
 # ---------------------
 
@@ -57,6 +57,11 @@ test: ## Test the project
 test-coverage: ## Test the project with coverage report
 	@echo "Testing with coverage ..."
 	go test -v -race -count=1 -coverprofile=coverage.out ./...
+	go tool cover -html=coverage.out -o coverage.html
+
+test-integration: ## Test the project with integration tag and coverage report
+	@echo "Running integration tests ..."
+	go test -v -race -count=1 -tags=integration -coverprofile=coverage.out ./...
 	go tool cover -html=coverage.out -o coverage.html
 
 lint: ## Lint the project
