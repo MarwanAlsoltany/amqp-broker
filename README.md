@@ -288,6 +288,7 @@ make test-integration
 ```
 
 Review test files for comprehensive usage examples:
+
 - [`broker_test.go`](broker_test.go): broker operations
 - [`publisher_test.go`](publisher_test.go): publishing patterns
 - [`consumer_test.go`](consumer_test.go): consuming patterns
@@ -299,6 +300,14 @@ Review test files for comprehensive usage examples:
 **v0.0.1**: Initial baseline release with complete feature set and 90%+ test coverage.
 
 Future versions will include package restructuring for improved API organization and testability. Contributions welcome after the restructuring phase.
+
+## Attribution
+
+This project was created as part of the development of synQup NextGen at [www.synqup.com](https://www.synqup.com) and is being released as open source with the company's approval.
+
+It is not an official synQup product. All trademarks, product names, and company references remain the property of their respective owners.
+
+The code is provided as is, without warranty.
 
 ## License
 
