@@ -72,7 +72,7 @@ func (p *pool[T]) cleanup() error {
 	})
 
 	if err := errors.Join(errs...); err != nil {
-		return fmt.Errorf("%w: close failed: %w", ErrPool, err)
+		return fmt.Errorf("pool: close failed: %w", err)
 	}
 
 	return nil
@@ -94,7 +94,7 @@ func (p *pool[T]) acquire(key string, factory func() (T, error)) (T, func(), err
 	var zero T
 
 	if p.closed.Load() {
-		return zero, nil, ErrPoolClosed
+		return zero, nil, errors.New("pool: closed")
 	}
 
 	// fast path: reuse existing

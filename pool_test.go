@@ -40,8 +40,7 @@ func TestPoolInit(t *testing.T) {
 		err := p.init(ctx)
 		require.NoError(t, err)
 
-		key := "test-key"
-
+		key := "key"
 		// create and release an item
 		value, release, err := p.acquire(key, func() (*mockCloser, error) {
 			return &mockCloser{}, nil
@@ -85,8 +84,8 @@ func TestPoolInit(t *testing.T) {
 func TestPoolAcquire(t *testing.T) {
 	t.Run("WithActiveItems", func(t *testing.T) {
 		p := newPool[string](time.Minute)
-		key := "test-key"
-		value1 := "first-value"
+		key := "key"
+		value1 := "value"
 		// first acquisition - creates new
 		val1, release1, err := p.acquire(key, func() (string, error) {
 			return value1, nil
@@ -150,11 +149,11 @@ func TestPoolAcquire(t *testing.T) {
 
 	t.Run("UpdatesItemLastUsed", func(t *testing.T) {
 		p := newPool[string](time.Minute)
-		key := "test-key"
 
 		before := time.Now()
+		key := "key"
 		value, release, err := p.acquire(key, func() (string, error) {
-			return "test", nil
+			return "any", nil
 		})
 		require.NoError(t, err)
 		after := time.Now()
@@ -184,10 +183,10 @@ func TestPoolAcquire(t *testing.T) {
 
 	t.Run("DecrementsItemRefCount", func(t *testing.T) {
 		p := newPool[string](time.Minute)
-		key := "test-key"
 
+		key := "key"
 		_, release, err := p.acquire(key, func() (string, error) {
-			return "test", nil
+			return "any", nil
 		})
 		require.NoError(t, err)
 
@@ -202,7 +201,7 @@ func TestPoolAcquire(t *testing.T) {
 
 	t.Run("WhenFactoryErrors", func(t *testing.T) {
 		p := newPool[string](time.Minute)
-		key := "test-key"
+		key := "key"
 		expectedErr := assert.AnError
 		value, release, err := p.acquire(key, func() (string, error) {
 			return "", expectedErr
@@ -224,12 +223,12 @@ func TestPoolAcquire(t *testing.T) {
 		require.NoError(t, err)
 
 		// try to acquire after close
-		value, release, err := p.acquire("test-key", func() (string, error) {
-			return "test-value", nil
+		value, release, err := p.acquire("key", func() (string, error) {
+			return "value", nil
 		})
 
 		assert.Error(t, err)
-		assert.ErrorIs(t, err, ErrPoolClosed)
+		assert.ErrorContains(t, err, "pool: closed")
 		assert.Empty(t, value)
 		assert.Nil(t, release)
 	})
@@ -238,7 +237,9 @@ func TestPoolAcquire(t *testing.T) {
 	// is safe and that reference counting works as expected
 	t.Run("ConcurrentAccess", func(t *testing.T) {
 		p := newPool[string](time.Minute)
-		key := "test-key"
+
+		key := "key"
+		value := "shared"
 
 		var wg sync.WaitGroup
 		const goroutines = 10
@@ -246,10 +247,10 @@ func TestPoolAcquire(t *testing.T) {
 		for range goroutines {
 			wg.Go(func() {
 				item, release, err := p.acquire(key, func() (string, error) {
-					return "shared-value", nil
+					return value, nil
 				})
 				assert.NoError(t, err)
-				assert.Equal(t, "shared-value", item)
+				assert.Equal(t, value, item)
 				// simulate some work
 				time.Sleep(10 * time.Millisecond)
 				release()
@@ -265,72 +266,119 @@ func TestPoolAcquire(t *testing.T) {
 		assert.Equal(t, int32(0), item.refCount.Load())
 	})
 
-	// stresses the pool's ability to handle simultaneous creation
-	// attempts and ensures proper cleanup of redundant resources
+	// stresses the pool's ability to handle simultaneous creation attempts and
+	// ensures proper cleanup of redundant resources (the LoadOrStore race-catcher path)
 	t.Run("ConcurrentRace", func(t *testing.T) {
-		p := newPool[*mockCloser](time.Minute)
-		key := "test-key"
+		t.Run("WithCloser", func(t *testing.T) {
+			p := newPool[*mockCloser](time.Minute)
 
-		var wg sync.WaitGroup
-		const goroutines = 10
+			key := "closer"
 
-		// barrier to synchronize goroutines
-		// this ensures they all attempt to acquire at the same time
-		// otherwise it is random and the coverage will not always happen
-		startCh := make(chan struct{})
+			var wg sync.WaitGroup
+			const goroutines = 10
 
-		// track all created items to verify losers are closed
-		var itemsMu sync.Mutex
-		createdItems := []*mockCloser{}
-		createdCount := atomic.Int32{}
+			// barrier to synchronize goroutines
+			// this ensures they all attempt to acquire at the same time
+			// otherwise it is random and the coverage will not always happen
+			startCh := make(chan struct{})
 
-		for range goroutines {
-			wg.Go(func() {
-				<-startCh // wait for the signal to start together
+			// track all created items to verify losers are closed
+			var itemsMu sync.Mutex
+			createdItems := []*mockCloser{}
+			createdCount := atomic.Int32{}
 
-				_, release, err := p.acquire(key, func() (*mockCloser, error) {
-					createdCount.Add(1)
-					item := &mockCloser{}
-					itemsMu.Lock()
-					createdItems = append(createdItems, item)
-					itemsMu.Unlock()
-					return item, nil
+			for range goroutines {
+				wg.Go(func() {
+					<-startCh // wait for the signal to start together
+
+					_, release, err := p.acquire(key, func() (*mockCloser, error) {
+						createdCount.Add(1)
+						item := &mockCloser{}
+						itemsMu.Lock()
+						createdItems = append(createdItems, item)
+						itemsMu.Unlock()
+						return item, nil
+					})
+					require.NoError(t, err)
+					// simulate some work
+					time.Sleep(10 * time.Millisecond)
+					release()
 				})
-				require.NoError(t, err)
-				// simulate some work
-				time.Sleep(10 * time.Millisecond)
-				release()
-			})
-		}
-
-		close(startCh) // release all goroutines at once
-		wg.Wait()
-
-		// multiple goroutines created items, but only 1 should be kept
-		raw, ok := p.items.Load(key)
-		require.True(t, ok)
-		item := raw.(*poolItem[*mockCloser])
-		assert.Equal(t, int32(0), item.refCount.Load(), "all should be released")
-
-		// count how many items were closed (losers should be closed)
-		itemsMu.Lock()
-		closedCount := 0
-		var winner *mockCloser
-		for _, created := range createdItems {
-			if created.closed.Load() {
-				closedCount++
-			} else {
-				winner = created
 			}
-		}
-		itemsMu.Unlock()
 
-		// winner should be in the pool and not closed
-		assert.Equal(t, item.value, winner, "winner should be in pool")
-		assert.False(t, item.value.closed.Load(), "winner should not be closed")
+			close(startCh) // release all goroutines at once
+			wg.Wait()
 
-		// losers should have been closed (all but the winner)
-		assert.Equal(t, len(createdItems)-1, closedCount, "race losers should be closed")
+			// multiple goroutines created items, but only 1 should be kept
+			raw, ok := p.items.Load(key)
+			require.True(t, ok)
+			item := raw.(*poolItem[*mockCloser])
+			assert.Equal(t, int32(0), item.refCount.Load(), "all should be released")
+
+			// count how many items were closed (losers should be closed)
+			itemsMu.Lock()
+			closedCount := 0
+			var winner *mockCloser
+			for _, created := range createdItems {
+				if created.closed.Load() {
+					closedCount++
+				} else {
+					winner = created
+				}
+			}
+			itemsMu.Unlock()
+
+			// winner should be in the pool and not closed
+			assert.Equal(t, item.value, winner, "winner should be in pool")
+			assert.False(t, item.value.closed.Load(), "winner should not be closed")
+
+			// losers should have been closed (all but the winner)
+			assert.Equal(t, len(createdItems)-1, closedCount, "race losers should be closed")
+		})
+
+		// same race scenario but with a non-io.Closer type to cover the branch
+		// where the losing value cannot be closed (type assertion fails);
+		// uses a barrier inside the factory to slow goroutines down so that multiple
+		// are in the slow path simultaneously, guaranteeing LoadOrStore races
+		t.Run("WithNonCloser", func(t *testing.T) {
+			p := newPool[string](time.Minute)
+
+			key := "key"
+			value := "value"
+
+			var wg sync.WaitGroup
+			const goroutines = 10
+
+			startCh := make(chan struct{})
+
+			// barrier inside the factory: all goroutines pause until the gate opens,
+			// ensuring they all reach LoadOrStore at the same time
+			gate := make(chan struct{})
+			var once sync.Once
+
+			for range goroutines {
+				wg.Go(func() {
+					<-startCh
+					_, release, err := p.acquire(key, func() (string, error) {
+						once.Do(func() { close(gate) }) // first caller opens the gate
+						<-gate                          // all callers wait for the gate
+						return value, nil
+					})
+					require.NoError(t, err)
+					time.Sleep(10 * time.Millisecond)
+					release()
+				})
+			}
+
+			close(startCh)
+			wg.Wait()
+
+			raw, ok := p.items.Load(key)
+			require.True(t, ok)
+			item := raw.(*poolItem[string])
+			assert.Equal(t, int32(0), item.refCount.Load(), "all should be released")
+			assert.Equal(t, value, item.value)
+		})
 	})
 }
 
@@ -338,8 +386,8 @@ func TestPoolCleanup(t *testing.T) {
 	t.Run("RemovesIdleItems", func(t *testing.T) {
 		ttl := 100 * time.Millisecond
 		p := newPool[*mockCloser](ttl)
-		key := "test-key"
 
+		key := "closer"
 		// acquire and release immediately
 		value, release, err := p.acquire(key, func() (*mockCloser, error) {
 			return &mockCloser{}, nil
@@ -365,8 +413,8 @@ func TestPoolCleanup(t *testing.T) {
 
 	t.Run("PreservesActiveItems", func(t *testing.T) {
 		p := newPool[*mockCloser](10 * time.Millisecond)
-		key := "test-key"
 
+		key := "closer"
 		closer := &mockCloser{}
 		value, release, err := p.acquire(key, func() (*mockCloser, error) {
 			return closer, nil
@@ -396,7 +444,7 @@ func TestPoolCleanup(t *testing.T) {
 		ttl := 100 * time.Millisecond
 		p := newPool[*mockCloser](ttl)
 
-		key := "test-key"
+		key := "closer"
 		value, release, err := p.acquire(key, func() (*mockCloser, error) {
 			return &mockCloser{}, nil
 		})
@@ -425,7 +473,7 @@ func TestPoolCleanup(t *testing.T) {
 			value := &mockCloser{
 				closeErr: assert.AnError,
 			}
-			_, release, err := p.acquire("test-key", func() (*mockCloser, error) {
+			_, release, err := p.acquire("key", func() (*mockCloser, error) {
 				return value, nil
 			})
 			require.NoError(t, err)
@@ -445,11 +493,12 @@ func TestPoolCleanup(t *testing.T) {
 	t.Run("IgnoresNonClosers", func(t *testing.T) {
 		ttl := 100 * time.Millisecond
 		p := newPool[string](ttl)
-		key := "test-key"
 
+		key := "key"
+		value := "value"
 		// acquire and release string (not io.Closer)
 		_, release, err := p.acquire(key, func() (string, error) {
-			return "test", nil
+			return value, nil
 		})
 		require.NoError(t, err)
 		release()
@@ -470,8 +519,8 @@ func TestPoolCleanup(t *testing.T) {
 	t.Run("RespectsTimingBeforeAndAfterTTL", func(t *testing.T) {
 		ttl := 200 * time.Millisecond
 		p := newPool[*mockCloser](ttl)
-		key := "test-key"
 
+		key := "closer"
 		// acquire and release
 		value, release, err := p.acquire(key, func() (*mockCloser, error) {
 			return &mockCloser{}, nil
@@ -548,8 +597,8 @@ func TestPoolCleanup(t *testing.T) {
 	t.Run("ReacquireExtendsItemLifetime", func(t *testing.T) {
 		ttl := 100 * time.Millisecond
 		p := newPool[*mockCloser](ttl)
-		key := "test-key"
 
+		key := "closer"
 		// first acquisition
 		value, release1, err := p.acquire(key, func() (*mockCloser, error) {
 			return &mockCloser{}, nil
@@ -605,8 +654,8 @@ func TestPoolClose(t *testing.T) {
 	t.Run("RemovesIdleItems", func(t *testing.T) {
 		ttl := 50 * time.Millisecond
 		p := newPool[*mockCloser](ttl)
-		key := "test-key"
 
+		key := "closer"
 		// acquire and release
 		value, release, err := p.acquire(key, func() (*mockCloser, error) {
 			return &mockCloser{}, nil
@@ -632,8 +681,8 @@ func TestPoolClose(t *testing.T) {
 
 	t.Run("PreservesActiveItems", func(t *testing.T) {
 		p := newPool[*mockCloser](time.Minute)
-		key := "test-key"
 
+		key := "closer"
 		// acquire but don't release
 		value, release, err := p.acquire(key, func() (*mockCloser, error) {
 			return &mockCloser{}, nil
