@@ -7,9 +7,6 @@ import (
 	"time"
 )
 
-// testURL is an invalid AMQP URL for testing purposes.
-const testURL = "amqp://invalid"
-
 // testName generates a unique name for tests
 func testName(prefix string) string {
 	now := time.Now()
@@ -29,21 +26,6 @@ func testHandler(ackAction HandlerAction) func(context.Context, *Message) (Handl
 	}
 }
 
-// testErrorHandler returns a handler that returns the given HandlerAction and error.
-func testErrorHandler(ackAction HandlerAction, err error) func(context.Context, *Message) (HandlerAction, error) {
-	return func(ctx context.Context, msg *Message) (HandlerAction, error) {
-		return ackAction, err
-	}
-}
-
-// testSleepHandler returns a handler that sleeps for the given duration before returning the given HandlerAction.
-func testSleepHandler(ackAction HandlerAction, sleep time.Duration) func(context.Context, *Message) (HandlerAction, error) {
-	return func(ctx context.Context, msg *Message) (HandlerAction, error) {
-		time.Sleep(sleep)
-		return ackAction, nil
-	}
-}
-
 // countingHandler returns a handler that increments the given atomic counter and returns the given HandlerAction.
 func testCountingHandler(ackAction HandlerAction, counter *atomic.Int32) func(context.Context, *Message) (HandlerAction, error) {
 	return func(ctx context.Context, msg *Message) (HandlerAction, error) {
@@ -52,12 +34,18 @@ func testCountingHandler(ackAction HandlerAction, counter *atomic.Int32) func(co
 	}
 }
 
-// testProcessingHandler returns a handler that simulates processing by sleeping for the given duration
-// and increments the given atomic counter when processing starts.
-func testProcessingHandler(ackAction HandlerAction, delay time.Duration, counter *atomic.Int32) func(context.Context, *Message) (HandlerAction, error) {
-	return func(ctx context.Context, msg *Message) (HandlerAction, error) {
-		time.Sleep(delay)
-		counter.Add(1)
-		return ackAction, nil
+// newTestBrokerWithConnection creates a Broker whose connection pool is seeded with conn.
+// Pool is disabled (cacheTTL=0) to keep setup minimal.
+// The broker must be closed by the caller.
+func newTestBrokerWithConnection(conn Connection) *Broker {
+	b, err := New(
+		WithConnectionDialer(func(_ string, _ *Config) (Connection, error) {
+			return conn, nil
+		}),
+		WithCache(0),
+	)
+	if err != nil {
+		panic("newTestBrokerWithConnection: " + err.Error())
 	}
+	return b
 }

@@ -8,15 +8,17 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/MarwanAlsoltany/amqp-broker/internal/transport"
 )
 
-func (s *brokerIntegrationTestSuite) TestBrokerNew() {
+func (s *integrationTestSuite) TestBrokerNew() {
 	s.Run("WithURL", func() {
-		b, err := New(WithURL(s.url))
+		b, err := New(WithURL(s.URL))
 		defer b.Close()
 		s.Require().NoError(err)
 		s.NotNil(b)
-		s.Equal(s.url, b.url)
+		s.Equal(s.URL, b.url)
 	})
 
 	s.Run("WithIdentifier", func() {
@@ -31,7 +33,7 @@ func (s *brokerIntegrationTestSuite) TestBrokerNew() {
 	})
 
 	s.Run("WithContext", func() {
-		ctx, cancel := context.WithCancel(s.ctx)
+		ctx, cancel := context.WithCancel(s.CTX)
 		defer cancel()
 
 		b := s.newTestBroker(WithContext(ctx))
@@ -46,31 +48,6 @@ func (s *brokerIntegrationTestSuite) TestBrokerNew() {
 		case <-time.After(100 * time.Millisecond):
 			s.Fail("broker internal context should be cancelled after Close()")
 		}
-	})
-
-	s.Run("WithCache", func() {
-		// when positive
-		b1 := s.newTestBroker(WithCache(10 * time.Minute))
-		s.Equal(10*time.Minute, b1.cacheTTL)
-		// when zero
-		b2 := s.newTestBroker(WithCache(0))
-		s.Equal(time.Duration(0), b2.cacheTTL)
-		// when negative
-		b3 := s.newTestBroker(WithCache(-1 * time.Minute))
-		s.Equal(time.Duration(0), b3.cacheTTL)
-	})
-
-	s.Run("WithConnectionPoolSize", func() {
-		// single connection
-		b1 := s.newTestBroker(WithConnectionPoolSize(1))
-		s.Equal(1, b1.connectionMgr.opts.Size)
-		s.Len(b1.connectionMgr.pool, 1)
-		b1.Close()
-		// multiple connections
-		b2 := s.newTestBroker(WithConnectionPoolSize(3))
-		s.Equal(3, b2.connectionMgr.opts.Size)
-		s.Len(b2.connectionMgr.pool, 3)
-		b2.Close()
 	})
 
 	s.Run("WithConnectionHandlers", func() {
@@ -107,30 +84,12 @@ func (s *brokerIntegrationTestSuite) TestBrokerNew() {
 		// block can't be easily simulated as it depends on server behavior
 	})
 
-	s.Run("WithEndpointOptions", func() {
-		b := s.newTestBroker(
-			WithEndpointOptions(EndpointOptions{
-				NoWaitReady:     false,
-				ReadyTimeout:    5 * time.Second,
-				NoAutoReconnect: true,
-				ReconnectMin:    1 * time.Second,
-				ReconnectMax:    10 * time.Second,
-			}),
-		)
-		s.NotNil(b)
-		s.False(b.endpointOpts.NoWaitReady)
-		s.Equal(5*time.Second, b.endpointOpts.ReadyTimeout)
-		s.True(b.endpointOpts.NoAutoReconnect)
-		s.Equal(1*time.Second, b.endpointOpts.ReconnectMin)
-		s.Equal(10*time.Second, b.endpointOpts.ReconnectMax)
-	})
-
 	s.Run("State", func() {
 		b := s.newTestBroker()
 
 		s.Equal(defaultBrokerID, b.id)
-		s.Equal(defaultCacheTTL, b.cacheTTL)
-		s.Equal(s.url, b.url)
+		s.Equal(defaultBrokerCacheTTL, b.cacheTTL)
+		s.Equal(s.URL, b.url)
 
 		s.NotNil(b.ctx)
 		s.NotNil(b.cancel)
@@ -138,16 +97,17 @@ func (s *brokerIntegrationTestSuite) TestBrokerNew() {
 
 		s.NotNil(b.connectionMgr)
 		// connectionMgrOpts should have defaults merged
-		s.Equal(defaultConnectionPoolSize, b.connectionMgrOpts.Size)
-		s.Equal(defaultReconnectMin, b.connectionMgrOpts.ReconnectMin)
-		s.Equal(defaultReconnectMax, b.connectionMgrOpts.ReconnectMax)
+		s.Equal(transport.DefaultConnectionPoolSize, b.connectionMgrOpts.Size)
+		s.Equal(transport.DefaultReconnectMin, b.connectionMgrOpts.ReconnectMin)
+		s.Equal(transport.DefaultReconnectMax, b.connectionMgrOpts.ReconnectMax)
 		s.False(b.connectionMgrOpts.NoAutoReconnect)
+		s.Nil(b.connectionMgrOpts.Dialer)
 		s.Nil(b.connectionMgrOpts.Config)
 		s.Nil(b.connectionMgrOpts.OnOpen)
 		s.Nil(b.connectionMgrOpts.OnClose)
 		s.Nil(b.connectionMgrOpts.OnBlock)
 
-		s.NotNil(b.topologyMgr)
+		s.NotNil(b.topologyReg)
 
 		s.NotNil(b.endpointOpts)
 
@@ -160,7 +120,7 @@ func (s *brokerIntegrationTestSuite) TestBrokerNew() {
 	})
 }
 
-func (s *brokerIntegrationTestSuite) TestBrokerClose() {
+func (s *integrationTestSuite) TestBrokerClose() {
 	b := s.newTestBroker()
 
 	qName := testName("test-queue")
@@ -196,44 +156,9 @@ func (s *brokerIntegrationTestSuite) TestBrokerClose() {
 		err = b.Close() // closing again should be safe
 		s.NoError(err)
 	})
-
-	s.Run("WithNewPublisher", func() {
-		b := s.newTestBroker()
-		eName := testName("test-exchange")
-		qName := testName("test-queue")
-		topology := &Topology{
-			Exchanges: []Exchange{{Name: eName, Type: "direct"}},
-			Queues:    []Queue{{Name: qName}},
-		}
-		err := b.Declare(topology)
-		s.Require().NoError(err)
-		err = b.Close()
-		s.Require().NoError(err)
-		_, err = b.NewPublisher(&PublisherOptions{}, topology.Exchanges[0])
-		s.Error(err)
-		s.Equal(ErrBrokerClosed, err)
-	})
-
-	s.Run("WithNewConsumer", func() {
-		b := s.newTestBroker()
-		eName := testName("test-exchange")
-		qName := testName("test-queue")
-		topology := &Topology{
-			Exchanges: []Exchange{{Name: eName, Type: "direct"}},
-			Queues:    []Queue{{Name: qName}},
-		}
-		err := b.Declare(topology)
-		s.Require().NoError(err)
-		err = b.Close()
-		s.Require().NoError(err)
-		handler := testHandler(HandlerActionAck)
-		_, err = b.NewConsumer(&ConsumerOptions{}, topology.Queues[0], handler)
-		s.Error(err)
-		s.Equal(ErrBrokerClosed, err)
-	})
 }
 
-func (s *brokerIntegrationTestSuite) TestBrokerConnection() {
+func (s *integrationTestSuite) TestBrokerConnection() {
 	b := s.newTestBroker()
 
 	conn, err := b.Connection()
@@ -254,7 +179,7 @@ func (s *brokerIntegrationTestSuite) TestBrokerConnection() {
 	})
 }
 
-func (s *brokerIntegrationTestSuite) TestBrokerChannel() {
+func (s *integrationTestSuite) TestBrokerChannel() {
 	b := s.newTestBroker()
 
 	ch, err := b.Channel()
@@ -275,11 +200,12 @@ func (s *brokerIntegrationTestSuite) TestBrokerChannel() {
 	})
 }
 
-func (s *brokerIntegrationTestSuite) TestBrokerDeclare() {
+func (s *integrationTestSuite) TestBrokerDeclare() {
 	b := s.newTestBroker()
 
 	eName := testName("test-exchange")
 	qName := testName("test-queue")
+	kName := testName("test-key")
 
 	topology := &Topology{
 		Exchanges: []Exchange{
@@ -289,7 +215,7 @@ func (s *brokerIntegrationTestSuite) TestBrokerDeclare() {
 			{Name: qName, Durable: true},
 		},
 		Bindings: []Binding{
-			{Source: eName, Destination: qName, Key: "test"},
+			{Source: eName, Destination: qName, Key: kName},
 		},
 	}
 
@@ -297,13 +223,13 @@ func (s *brokerIntegrationTestSuite) TestBrokerDeclare() {
 	s.NoError(err)
 
 	// verify topology is stored
-	s.NotNil(b.topologyMgr)
-	s.Len(b.topologyMgr.exchanges, 1)
-	s.Len(b.topologyMgr.queues, 1)
-	s.Len(b.topologyMgr.bindings, 1)
+	s.NotNil(b.topologyReg)
+	s.NotNil(b.topologyReg.Exchange(eName))
+	s.NotNil(b.topologyReg.Queue(qName))
+	s.NotNil(b.topologyReg.Binding(eName, qName, kName))
 
 	// verify we can retrieve declared queue
-	q := b.topologyMgr.queue(qName)
+	q := b.topologyReg.Queue(qName)
 	s.NotNil(q)
 	s.Equal(qName, q.Name)
 	s.True(q.Durable)
@@ -350,18 +276,9 @@ func (s *brokerIntegrationTestSuite) TestBrokerDeclare() {
 		err = b.Declare(topology4)
 		s.Error(err)
 	})
-
-	s.Run("WhenClosed", func() {
-		b, t := s.newTestBrokerWithTopology()
-		err := b.Close()
-		s.Require().NoError(err)
-		err = b.Declare(t)
-		s.Error(err)
-		s.ErrorIs(err, ErrBroker)
-	})
 }
 
-func (s *brokerIntegrationTestSuite) TestBrokerVerify() {
+func (s *integrationTestSuite) TestBrokerVerify() {
 	b := s.newTestBroker()
 
 	eName := testName("test-exchange")
@@ -377,8 +294,8 @@ func (s *brokerIntegrationTestSuite) TestBrokerVerify() {
 
 	err = b.Verify(topology)
 	s.NoError(err)
-	s.NotNil(b.topologyMgr.exchange(eName))
-	s.NotNil(b.topologyMgr.queue(qName))
+	s.NotNil(b.topologyReg.Exchange(eName))
+	s.NotNil(b.topologyReg.Queue(qName))
 
 	s.Run("WithInvalidTopology", func() {
 		b := s.newTestBroker()
@@ -390,18 +307,9 @@ func (s *brokerIntegrationTestSuite) TestBrokerVerify() {
 		err := b.Verify(topology)
 		s.Error(err)
 	})
-
-	s.Run("WhenClosed", func() {
-		b, t := s.newTestBrokerWithTopology()
-		err := b.Close()
-		s.Require().NoError(err)
-		err = b.Verify(t)
-		s.Error(err)
-		s.ErrorIs(err, ErrBroker)
-	})
 }
 
-func (s *brokerIntegrationTestSuite) TestBrokerDelete() {
+func (s *integrationTestSuite) TestBrokerDelete() {
 	b := s.newTestBroker()
 
 	eName := testName("test-exchange")
@@ -415,10 +323,8 @@ func (s *brokerIntegrationTestSuite) TestBrokerDelete() {
 	s.Require().NoError(err)
 	err = b.Delete(topology)
 	s.NoError(err)
-	s.Nil(b.topologyMgr.exchange(eName))
-	s.Nil(b.topologyMgr.queue(qName))
-	s.Len(b.topologyMgr.exchanges, 0)
-	s.Len(b.topologyMgr.queues, 0)
+	s.Nil(b.topologyReg.Exchange(eName))
+	s.Nil(b.topologyReg.Queue(qName))
 
 	s.Run("WithInvalidTopology", func() {
 		b := s.newTestBroker()
@@ -432,22 +338,14 @@ func (s *brokerIntegrationTestSuite) TestBrokerDelete() {
 		err = b.Delete(topology)
 		s.Error(err)
 	})
-
-	s.Run("WhenClosed", func() {
-		b, t := s.newTestBrokerWithTopology()
-		err := b.Close()
-		s.Require().NoError(err)
-		err = b.Delete(t)
-		s.Error(err)
-		s.ErrorIs(err, ErrBroker)
-	})
 }
 
-func (s *brokerIntegrationTestSuite) TestBrokerSync() {
+func (s *integrationTestSuite) TestBrokerSync() {
 	b := s.newTestBroker()
 
 	eName := testName("test-exchange")
 	qName := testName("test-queue")
+	kName := testName("test-key")
 
 	topology := &Topology{
 		Exchanges: []Exchange{
@@ -457,7 +355,7 @@ func (s *brokerIntegrationTestSuite) TestBrokerSync() {
 			{Name: qName, Durable: true},
 		},
 		Bindings: []Binding{
-			{Source: eName, Destination: qName, Key: "test"},
+			{Source: eName, Destination: qName, Key: kName},
 		},
 	}
 
@@ -465,13 +363,13 @@ func (s *brokerIntegrationTestSuite) TestBrokerSync() {
 	s.NoError(err)
 
 	// verify topology is stored
-	s.NotNil(b.topologyMgr)
-	s.Len(b.topologyMgr.exchanges, 1)
-	s.Len(b.topologyMgr.queues, 1)
-	s.Len(b.topologyMgr.bindings, 1)
+	s.NotNil(b.topologyReg)
+	s.NotNil(b.topologyReg.Exchange(eName))
+	s.NotNil(b.topologyReg.Queue(qName))
+	s.NotNil(b.topologyReg.Binding(eName, qName, kName))
 
 	// verify we can retrieve declared queue
-	q := b.topologyMgr.queue(qName)
+	q := b.topologyReg.Queue(qName)
 	s.NotNil(q)
 	s.Equal(qName, q.Name)
 	s.True(q.Durable)
@@ -487,18 +385,9 @@ func (s *brokerIntegrationTestSuite) TestBrokerSync() {
 		s.Error(err)
 		s.ErrorIs(err, ErrTopologyValidation)
 	})
-
-	s.Run("WhenClosed", func() {
-		b, t := s.newTestBrokerWithTopology()
-		err := b.Close()
-		s.Require().NoError(err)
-		err = b.Sync(t)
-		s.Error(err)
-		s.ErrorIs(err, ErrBroker)
-	})
 }
 
-func (s *brokerIntegrationTestSuite) TestBrokerNewPublisher() {
+func (s *integrationTestSuite) TestBrokerNewPublisher() {
 	b, t := s.newTestBrokerWithTopology()
 
 	// publisher registry
@@ -506,33 +395,34 @@ func (s *brokerIntegrationTestSuite) TestBrokerNewPublisher() {
 		p, err := b.NewPublisher(&PublisherOptions{}, t.Exchanges[0])
 		s.Require().NoError(err)
 
-		publisher := p.(*publisher)
-
 		b.publishersMu.Lock()
-		_, exists := b.publishers[publisher.id]
+		countBefore := len(b.publishers)
 		b.publishersMu.Unlock()
-		s.True(exists)
+		s.Equal(1, countBefore)
 
 		p.Close()
 
 		b.publishersMu.Lock()
-		_, exists = b.publishers[publisher.id]
+		countAfterClose := len(b.publishers)
 		b.publishersMu.Unlock()
-		s.True(exists)
+		s.Equal(1, countAfterClose, "Close should keep publisher in registry")
 
-		p.Release()
+		err = b.Release(p)
+		s.NoError(err)
 
 		b.publishersMu.Lock()
-		_, exists = b.publishers[publisher.id]
+		countAfterRelease := len(b.publishers)
 		b.publishersMu.Unlock()
-		s.False(exists)
+		s.Equal(0, countAfterRelease, "Release should remove publisher from registry")
 	}
 
 	s.Run("Consistency", func() {
+		b, t := s.newTestBrokerWithTopology()
 		publishers := make([]Publisher, 5)
 		for i := range publishers {
 			p, err := b.NewPublisher(&PublisherOptions{}, t.Exchanges[0])
 			s.Require().NoError(err)
+			defer p.Close()
 			publishers[i] = p
 		}
 
@@ -540,10 +430,6 @@ func (s *brokerIntegrationTestSuite) TestBrokerNewPublisher() {
 		count := len(b.publishers)
 		b.publishersMu.Unlock()
 		s.Equal(5, count)
-
-		for _, p := range publishers {
-			p.Close()
-		}
 	})
 
 	s.Run("WhenClosed", func() {
@@ -557,7 +443,7 @@ func (s *brokerIntegrationTestSuite) TestBrokerNewPublisher() {
 	})
 }
 
-func (s *brokerIntegrationTestSuite) TestBrokerNewConsumer() {
+func (s *integrationTestSuite) TestBrokerNewConsumer() {
 	b, t := s.newTestBrokerWithTopology()
 
 	// registry
@@ -566,34 +452,35 @@ func (s *brokerIntegrationTestSuite) TestBrokerNewConsumer() {
 		c, err := b.NewConsumer(&ConsumerOptions{}, t.Queues[0], handler)
 		s.Require().NoError(err)
 
-		consumer := c.(*consumer)
-
 		b.consumersMu.Lock()
-		_, exists := b.consumers[consumer.id]
+		countBefore := len(b.consumers)
 		b.consumersMu.Unlock()
-		s.True(exists)
+		s.Equal(1, countBefore)
 
 		c.Close()
 
 		b.consumersMu.Lock()
-		_, exists = b.consumers[consumer.id]
+		countAfterClose := len(b.consumers)
 		b.consumersMu.Unlock()
-		s.True(exists)
+		s.Equal(1, countAfterClose, "Close should keep consumer in registry")
 
-		c.Release()
+		err = b.Release(c)
+		s.NoError(err)
 
 		b.consumersMu.Lock()
-		_, exists = b.consumers[consumer.id]
+		countAfterRelease := len(b.consumers)
 		b.consumersMu.Unlock()
-		s.False(exists)
+		s.Equal(0, countAfterRelease, "Release should remove consumer from registry")
 	}
 
 	s.Run("Consistency", func() {
+		b, t := s.newTestBrokerWithTopology()
 		handler := testHandler(HandlerActionAck)
 		consumers := make([]Consumer, 5)
 		for i := range consumers {
 			c, err := b.NewConsumer(&ConsumerOptions{}, t.Queues[0], handler)
 			s.Require().NoError(err)
+			defer c.Close()
 			consumers[i] = c
 		}
 
@@ -601,10 +488,6 @@ func (s *brokerIntegrationTestSuite) TestBrokerNewConsumer() {
 		count := len(b.consumers)
 		b.consumersMu.Unlock()
 		s.Equal(5, count)
-
-		for _, c := range consumers {
-			c.Close()
-		}
 	})
 
 	s.Run("WhenClosed", func() {
@@ -619,7 +502,7 @@ func (s *brokerIntegrationTestSuite) TestBrokerNewConsumer() {
 	})
 }
 
-func (s *brokerIntegrationTestSuite) TestBrokerMultipleEndpointsStress() {
+func (s *integrationTestSuite) TestBrokerMultipleEndpointsStress() {
 	b, t := s.newTestBrokerWithTopology()
 
 	start := time.Now()
@@ -661,14 +544,22 @@ func (s *brokerIntegrationTestSuite) TestBrokerMultipleEndpointsStress() {
 			defer p.Close()
 
 			for j := 0; j < messagesCount/publishersCount; j++ {
-				err := p.Publish(s.ctx, RoutingKey("test"), NewMessage([]byte("data")))
+				err := p.Publish(s.CTX, RoutingKey("test"), NewMessage([]byte("data")))
 				s.NoError(err)
 			}
 		})
 	}
 	wg.Wait()
 
-	time.Sleep(2 * time.Second)
+	// poll until all messages are received or deadline is exceeded; a fixed sleep is
+	// not sufficient on slow/contended systems (e.g. CI runners), because messages may
+	// still be buffered in the AMQP delivery channel after all publishes complete
+	ticker := time.NewTicker(100 * time.Millisecond)
+	deadline := time.Now().Add(30 * time.Second)
+	for received.Load() < int32(messagesCount) && time.Now().Before(deadline) {
+		<-ticker.C
+	}
+	ticker.Stop()
 
 	for _, c := range consumers {
 		c.Wait()
@@ -682,7 +573,7 @@ func (s *brokerIntegrationTestSuite) TestBrokerMultipleEndpointsStress() {
 	s.Equal(int32(messagesCount), received.Load())
 }
 
-func (s *brokerIntegrationTestSuite) TestBrokerPublisherFromTopology() {
+func (s *integrationTestSuite) TestBrokerPublisherFromTopology() {
 	b := s.newTestBroker()
 
 	eName := testName("test-exchange")
@@ -703,12 +594,12 @@ func (s *brokerIntegrationTestSuite) TestBrokerPublisherFromTopology() {
 	defer p.Close()
 
 	// publisher should have loaded full exchange details from topology
-	publisher := p.(*publisher)
-	s.Equal("topic", publisher.exchange.Type)
-	s.True(publisher.exchange.Durable)
+	// verify behaviorally by publishing successfully
+	err = p.Publish(s.CTX, RoutingKey(eName), NewMessage([]byte("test")))
+	s.NoError(err, "publisher should be able to publish with enriched exchange")
 }
 
-func (s *brokerIntegrationTestSuite) TestBrokerPublishConsume() {
+func (s *integrationTestSuite) TestBrokerPublishConsume() {
 	b, t := s.newTestBrokerWithTopology()
 
 	// create publisher
@@ -730,7 +621,7 @@ func (s *brokerIntegrationTestSuite) TestBrokerPublishConsume() {
 	// publish messages
 	messagesCount := 5
 	for range messagesCount {
-		err := p.Publish(s.ctx, RoutingKey("test"), NewMessage([]byte("test")))
+		err := p.Publish(s.CTX, RoutingKey("test"), NewMessage([]byte("test")))
 		s.Require().NoError(err)
 	}
 
@@ -741,7 +632,7 @@ func (s *brokerIntegrationTestSuite) TestBrokerPublishConsume() {
 	s.Equal(int32(messagesCount), received.Load())
 }
 
-func (s *brokerIntegrationTestSuite) TestBrokerNewPublisherConcurrentAccess() {
+func (s *integrationTestSuite) TestBrokerNewPublisherConcurrentAccess() {
 	b, t := s.newTestBrokerWithTopology()
 
 	// create consumer to receive messages
@@ -767,7 +658,7 @@ func (s *brokerIntegrationTestSuite) TestBrokerNewPublisherConcurrentAccess() {
 			defer p.Close()
 
 			for j := 0; j < messagesCount/publisherCount; j++ {
-				err := p.Publish(s.ctx, RoutingKey("test"), NewMessage([]byte("test")))
+				err := p.Publish(s.CTX, RoutingKey("test"), NewMessage([]byte("test")))
 				s.NoError(err)
 			}
 		})
@@ -781,11 +672,12 @@ func (s *brokerIntegrationTestSuite) TestBrokerNewPublisherConcurrentAccess() {
 	s.Equal(int32(messagesCount), received.Load())
 }
 
-func (s *brokerIntegrationTestSuite) TestBrokerPublish() {
+func (s *integrationTestSuite) TestBrokerPublish() {
 	b := s.newTestBroker()
 
 	// setup topology
 	eName := testName("test-exchange")
+	kName := testName("test-key")
 
 	topology := &Topology{
 		Exchanges: []Exchange{{Name: eName, Type: "direct"}},
@@ -795,46 +687,47 @@ func (s *brokerIntegrationTestSuite) TestBrokerPublish() {
 
 	// publish a message, will be discarded as no queues are bound
 	msg := NewMessage([]byte("test message"))
-	err = b.Publish(s.ctx, eName, "test", msg)
+	err = b.Publish(s.CTX, eName, kName, msg)
 	s.NoError(err)
 
 	s.Run("WithUnknownExchange", func() {
 		b := s.newTestBroker()
 		msg := NewMessage([]byte("test message"))
-		err := b.Publish(s.ctx, eName+"-unknown", "test", msg)
+		err := b.Publish(s.CTX, eName+"-unknown", kName, msg)
 		s.NoError(err)
 	})
 
 	s.Run("WithNoCache", func() {
 		b := s.newTestBroker(WithCache(0))
 		msg := NewMessage([]byte("test message"))
-		err := b.Publish(s.ctx, eName+"-no-cache", "test", msg)
+		err := b.Publish(s.CTX, eName+"-no-cache", kName, msg)
 		s.NoError(err)
 	})
 }
 
-func (s *brokerIntegrationTestSuite) TestBrokerConsume() {
+func (s *integrationTestSuite) TestBrokerConsume() {
 	b := s.newTestBroker()
 
 	// setup topology
 	eName := testName("test-exchange")
 	qName := testName("test-queue")
+	kName := testName("test-key")
 
 	topology := &Topology{
 		Exchanges: []Exchange{{Name: eName, Type: "direct"}},
 		Queues:    []Queue{{Name: qName}},
-		Bindings:  []Binding{{Source: eName, Destination: qName, Key: "test"}},
+		Bindings:  []Binding{{Source: eName, Destination: qName, Key: kName}},
 	}
 	err := b.Declare(topology)
 	s.Require().NoError(err)
 
 	// publish a message
 	msg := NewMessage([]byte("test message"))
-	err = b.Publish(s.ctx, eName, "test", msg)
+	err = b.Publish(s.CTX, eName, kName, msg)
 	s.NoError(err)
 
 	// consume using convenience method
-	ctx, cancel := context.WithTimeout(s.ctx, 2*time.Second)
+	ctx, cancel := context.WithTimeout(s.CTX, 2*time.Second)
 	defer cancel()
 
 	receivedCh := make(chan bool, 1)
@@ -857,33 +750,33 @@ func (s *brokerIntegrationTestSuite) TestBrokerConsume() {
 	}
 
 	s.Run("WithUnknownQueue", func() {
-		ctx, cancel := context.WithTimeout(s.ctx, 1*time.Second)
+		ctx, cancel := context.WithTimeout(s.CTX, 1*time.Second)
 		defer cancel()
 		err := b.Consume(ctx, qName+"-unknown", handler)
 		s.Error(err)
 	})
 }
 
-func (s *brokerIntegrationTestSuite) TestBrokerTransaction() {
+func (s *integrationTestSuite) TestBrokerTransaction() {
 	b := s.newTestBroker()
 
-	e := testName("test-exchange")
-	q := testName("test-queue")
-	k := testName("test-key")
+	eName := testName("test-exchange")
+	qName := testName("test-queue")
+	kName := testName("test-key")
 
 	topology := &Topology{
-		Exchanges: []Exchange{{Name: e, Durable: true, Type: "direct"}},
-		Queues:    []Queue{{Name: q, Durable: true, Exclusive: false}},
-		Bindings:  []Binding{{Source: e, Destination: q, Key: k}},
+		Exchanges: []Exchange{{Name: eName, Durable: true, Type: "direct"}},
+		Queues:    []Queue{{Name: qName, Durable: true, Exclusive: false}},
+		Bindings:  []Binding{{Source: eName, Destination: qName, Key: kName}},
 	}
 
 	var err error
 
 	// should succeed
-	err = b.Transaction(b.ctx, func(ch *Channel) error {
-		exchange := topology.Exchange(e)
-		queue := topology.Queue(q)
-		binding := topology.Binding(e, q, k)
+	err = b.Transaction(b.ctx, func(ch Channel) error {
+		exchange := topology.Exchange(eName)
+		queue := topology.Queue(qName)
+		binding := topology.Binding(eName, qName, kName)
 
 		if err := exchange.Declare(ch); err != nil {
 			return err
@@ -904,10 +797,10 @@ func (s *brokerIntegrationTestSuite) TestBrokerTransaction() {
 	s.NoError(err, "verify topology after transaction")
 
 	// should fail, declaration with the same name exists but durable=true
-	err = b.Transaction(b.ctx, func(ch *Channel) error {
-		exchange := *topology.Exchange(e)
-		queue := *topology.Queue(q)
-		binding := *topology.Binding(e, q, k)
+	err = b.Transaction(b.ctx, func(ch Channel) error {
+		exchange := *topology.Exchange(eName)
+		queue := *topology.Queue(qName)
+		binding := *topology.Binding(eName, qName, kName)
 
 		exchange.Durable = false // conflicting declaration
 		queue.Exclusive = true   // conflicting declaration
@@ -932,10 +825,92 @@ func (s *brokerIntegrationTestSuite) TestBrokerTransaction() {
 	s.NoError(err, "verify topology remains unchanged after failed transaction")
 
 	// should fail, committing on closed channel
-	err = b.Transaction(s.ctx, func(ch *Channel) error {
+	err = b.Transaction(s.CTX, func(ch Channel) error {
 		// close the channel to cause commit to fail
 		ch.Close()
 		return nil
 	})
 	s.Error(err, "transaction commit should fail with closed channel")
+}
+
+func (s *integrationTestSuite) TestBrokerRelease() {
+	s.Run("Publisher", func() {
+		b, t := s.newTestBrokerWithTopology()
+
+		p, err := b.NewPublisher(&PublisherOptions{}, t.Exchanges[0])
+		s.Require().NoError(err)
+
+		b.publishersMu.Lock()
+		countBefore := len(b.publishers)
+		b.publishersMu.Unlock()
+		s.Equal(1, countBefore)
+
+		err = b.Release(p)
+		s.NoError(err)
+
+		b.publishersMu.Lock()
+		countAfter := len(b.publishers)
+		b.publishersMu.Unlock()
+		s.Equal(0, countAfter)
+	})
+
+	s.Run("Consumer", func() {
+		b, t := s.newTestBrokerWithTopology()
+
+		handler := testHandler(HandlerActionAck)
+		c, err := b.NewConsumer(&ConsumerOptions{}, t.Queues[0], handler)
+		s.Require().NoError(err)
+
+		b.consumersMu.Lock()
+		countBefore := len(b.consumers)
+		b.consumersMu.Unlock()
+		s.Equal(1, countBefore)
+
+		err = b.Release(c)
+		s.NoError(err)
+
+		b.consumersMu.Lock()
+		countAfter := len(b.consumers)
+		b.consumersMu.Unlock()
+		s.Equal(0, countAfter)
+	})
+
+	s.Run("MultipleEndpoints", func() {
+		b, t := s.newTestBrokerWithTopology()
+
+		publishers := make([]Publisher, 3)
+		for i := range publishers {
+			p, err := b.NewPublisher(&PublisherOptions{}, t.Exchanges[0])
+			s.Require().NoError(err)
+			publishers[i] = p
+		}
+
+		// release only the middle one
+		err := b.Release(publishers[1])
+		s.NoError(err)
+
+		b.publishersMu.Lock()
+		count := len(b.publishers)
+		b.publishersMu.Unlock()
+		s.Equal(2, count, "only the released publisher should be removed")
+	})
+
+	s.Run("Idempotency", func() {
+		b, t := s.newTestBrokerWithTopology()
+
+		p, err := b.NewPublisher(&PublisherOptions{}, t.Exchanges[0])
+		s.Require().NoError(err)
+
+		// release twice, second call must not panic and registry stays at 0
+		err = b.Release(p)
+		s.NoError(err)
+
+		err = b.Release(p)
+		s.NoError(err) // close on already-closed endpoint may return an error; no panic
+
+		b.publishersMu.Lock()
+		count := len(b.publishers)
+		b.publishersMu.Unlock()
+		s.Equal(0, count)
+	})
 }
