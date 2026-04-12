@@ -9,26 +9,25 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/MarwanAlsoltany/amqp-broker/internal"
 	amqp091 "github.com/rabbitmq/amqp091-go"
 )
 
 var (
 	// ErrConnection is the base error for connection operations.
 	// All connection-related errors wrap this error.
-	ErrConnection = &internal.Error{Op: "connection"}
+	ErrConnection = ErrTransport.Derive("connection")
 
 	// ErrConnectionClosed indicates the connection is closed.
 	// This error is returned when operations are attempted on a closed connection.
-	ErrConnectionClosed = fmt.Errorf("%w: closed", ErrConnection)
+	ErrConnectionClosed = ErrConnection.Derive("closed")
 
 	// ErrConnectionManager is the base error for connection manager operations.
 	// All connection manager errors wrap this error.
-	ErrConnectionManager = fmt.Errorf("%w: manager", ErrConnection)
+	ErrConnectionManager = ErrConnection.Derive("manager")
 
 	// ErrConnectionManagerClosed indicates the connection manager is closed.
 	// This error is returned when operations are attempted on a closed manager.
-	ErrConnectionManagerClosed = fmt.Errorf("%w: closed", ErrConnectionManager)
+	ErrConnectionManagerClosed = ErrConnectionManager.Derive("closed")
 )
 
 // Dialer is a function type for creating AMQP connections.
@@ -179,7 +178,7 @@ func (cm *ConnectionManager) Init(ctx context.Context) error {
 	}
 
 	if err := ValidateConnectionManagerOptions(cm.opts); err != nil {
-		return fmt.Errorf("%w: %w", ErrConnectionManager, err)
+		return ErrConnectionManager.Detailf("%w", err)
 	}
 
 	cm.poolMu.Lock()
@@ -197,7 +196,7 @@ func (cm *ConnectionManager) Init(ctx context.Context) error {
 					_ = cm.pool[j].Close()
 				}
 			}
-			return fmt.Errorf("%w: init connection %d: %w", ErrConnectionManager, i+1, err)
+			return ErrConnectionManager.Detailf("init connection %d: %w", i+1, err)
 		}
 
 		cm.pool[i] = conn
@@ -219,7 +218,7 @@ func (cm *ConnectionManager) Replace(idx int) error {
 	defer cm.poolMu.Unlock()
 
 	if idx < 0 || idx >= len(cm.pool) {
-		return fmt.Errorf("%w: replace connection %d: out of range", ErrConnectionManager, idx)
+		return ErrConnectionManager.Detailf("replace connection %d: out of range", idx)
 	}
 
 	// close old connection if still open
@@ -243,7 +242,7 @@ func (cm *ConnectionManager) Replace(idx int) error {
 	if !autoReconnect {
 		conn, err := newConnection(cm.url, cm.opts.Config, cm.opts.Dialer)
 		if err != nil {
-			return fmt.Errorf("%w: replace connection %d: %w", ErrConnectionManager, idx, err)
+			return ErrConnectionManager.Detailf("replace connection %d: %w", idx, err)
 		}
 		cm.pool[idx] = conn
 		go cm.Monitor(conn)
@@ -259,7 +258,7 @@ func (cm *ConnectionManager) Replace(idx int) error {
 		}
 		// guard against nil context (e.g., when called before init())
 		if cm.ctx != nil && cm.ctx.Err() != nil {
-			return fmt.Errorf("%w: replace connection %d: context cancelled: %w", ErrConnectionManager, idx, cm.ctx.Err())
+			return ErrConnectionManager.Detailf("replace connection %d: context cancelled: %w", idx, cm.ctx.Err())
 		}
 
 		attempt++
@@ -277,7 +276,7 @@ func (cm *ConnectionManager) Replace(idx int) error {
 		if cm.ctx != nil {
 			select {
 			case <-cm.ctx.Done():
-				return fmt.Errorf("%w: replace connection %d (attempt %d): context cancelled: %w", ErrConnectionManager, idx, attempt, cm.ctx.Err())
+				return ErrConnectionManager.Detailf("replace connection %d (attempt %d): context cancelled: %w", idx, attempt, cm.ctx.Err())
 			case <-time.After(backoff):
 				delay = min(delay*2, reconnectMax)
 			}
@@ -468,7 +467,7 @@ func (cm *ConnectionManager) Assign(role ConnectionPurpose) (Connection, error) 
 
 	conn := cm.pool[idx]
 	if conn == nil {
-		return nil, fmt.Errorf("%w: assign connection %d: not available", ErrConnectionManager, idx)
+		return nil, ErrConnectionManager.Detailf("assign connection %d: not available", idx)
 	}
 
 	return conn, nil
@@ -499,7 +498,7 @@ func (cm *ConnectionManager) Close() error {
 	}
 
 	if err := errors.Join(errs...); err != nil {
-		return fmt.Errorf("%w: close failed: %w", ErrConnectionManager, err)
+		return ErrConnectionManager.Detailf("close failed: %w", err)
 	}
 
 	return nil
@@ -513,7 +512,7 @@ func newConnection(url string, config *Config, dialer Dialer) (Connection, error
 
 	conn, err := dialer(url, config)
 	if err != nil {
-		return nil, fmt.Errorf("%w: dial failed: %w", ErrConnection, err)
+		return nil, ErrConnection.Detailf("dial failed: %w", err)
 	}
 
 	return conn, nil

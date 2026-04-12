@@ -1,8 +1,6 @@
 package transport
 
 import (
-	"fmt"
-
 	amqp091 "github.com/rabbitmq/amqp091-go"
 
 	"github.com/MarwanAlsoltany/amqp-broker/internal"
@@ -11,11 +9,11 @@ import (
 var (
 	// ErrChannel is the base error for channel operations.
 	// All channel-related errors wrap this error.
-	ErrChannel = fmt.Errorf("%w channel", ErrConnection)
+	ErrChannel = ErrTransport.Derive("channel")
 
 	// ErrChannelClosed indicates the channel is closed.
 	// This error is returned when operations are attempted on a closed channel.
-	ErrChannelClosed = fmt.Errorf("%w: closed", ErrChannel)
+	ErrChannelClosed = ErrChannel.Derive("closed")
 )
 
 // DoSafeChannelAction executes a channel operation while monitoring for channel closure.
@@ -55,7 +53,7 @@ func DoSafeChannelActionWithReturn[T any](ch Channel, op func(Channel) (T, error
 	var zero T
 
 	if ch == nil {
-		return zero, fmt.Errorf("%w: not available", ErrChannel)
+		return zero, ErrChannel.Detail("not available")
 	}
 
 	// create a buffered channel to avoid deadlock
@@ -106,7 +104,7 @@ func DoSafeChannelActionWithReturn[T any](ch Channel, op func(Channel) (T, error
 
 	if chCloseErr != nil {
 		// return an error that lets callers inspect both errors
-		return zero, internal.Wrap("channel closed during operation", opResult.err, chCloseErr)
+		return zero, internal.ErrDomain.Wrap("channel closed during operation", opResult.err, chCloseErr)
 	}
 
 	// only operation error
