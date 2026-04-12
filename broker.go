@@ -47,9 +47,9 @@ var (
 	// to check if an error originated from the broker using errors.Is(err, ErrBroker).
 	ErrBroker = internal.ErrBroker
 	// ErrBrokerClosed indicates the broker is closed.
-	ErrBrokerClosed = fmt.Errorf("%w: closed", ErrBroker)
+	ErrBrokerClosed = ErrBroker.Derive("closed")
 	// ErrBrokerConfigInvalid indicates the broker configuration is invalid.
-	ErrBrokerConfigInvalid = fmt.Errorf("%w: config invalid", ErrBroker)
+	ErrBrokerConfigInvalid = ErrBroker.Derive("config invalid")
 )
 
 // Broker provides a high-level manager for AMQP connections, publishers, and consumers,
@@ -148,7 +148,7 @@ func New(opts ...Option) (*Broker, error) {
 	// validate connection manager options
 	if err := transport.ValidateConnectionManagerOptions(b.connectionMgrOpts); err != nil {
 		cancel()
-		return nil, fmt.Errorf("%w: connection manager options: %w", ErrBrokerConfigInvalid, err)
+		return nil, ErrBrokerConfigInvalid.Detailf("connection manager options: %w", err)
 	}
 
 	// merge endpoint options defaults, then validate
@@ -156,7 +156,7 @@ func New(opts ...Option) (*Broker, error) {
 	// validate endpoint options
 	if err := endpoint.ValidateEndpointOptions(b.endpointOpts); err != nil {
 		cancel()
-		return nil, fmt.Errorf("%w: endpoint options: %w", ErrBrokerConfigInvalid, err)
+		return nil, ErrBrokerConfigInvalid.Detailf("endpoint options: %w", err)
 	}
 
 	b.connectionMgr = transport.NewConnectionManager(b.url, &b.connectionMgrOpts)
@@ -188,7 +188,7 @@ func New(opts ...Option) (*Broker, error) {
 func (b *Broker) Connection() (Connection, error) {
 	conn, err := b.connectionMgr.Assign(transport.ConnectionPurposeControl)
 	if err != nil {
-		return nil, internal.Wrap("create control connection", err)
+		return nil, internal.ErrDomain.Wrap("create control connection", err)
 	}
 	// safe-guard: make sure connection is open
 	if conn.IsClosed() {
@@ -213,7 +213,7 @@ func (b *Broker) Channel() (Channel, error) {
 
 	ch, err := conn.Channel()
 	if err != nil {
-		return nil, internal.Wrap("create control channel", err)
+		return nil, internal.ErrDomain.Wrap("create control channel", err)
 	}
 	// safe-guard: make sure channel is open
 	if ch.IsClosed() {
@@ -273,7 +273,7 @@ func (b *Broker) Close() error {
 	}
 
 	if err := errors.Join(errs...); err != nil {
-		return fmt.Errorf("%w: close failed: %w", ErrBroker, err)
+		return ErrBroker.Detailf("close failed: %w", err)
 	}
 
 	return nil
@@ -465,7 +465,11 @@ func (b *Broker) Release(ep Endpoint) error {
 		b.consumersMu.Unlock()
 	}
 
-	return err
+	if err != nil {
+		return ErrBroker.Detailf("release endpoint: %w", err)
+	}
+
+	return nil
 }
 
 // Publish performs a one-off publish using a cached publisher if pooling is enabled.
@@ -504,7 +508,7 @@ func (b *Broker) Publish(ctx context.Context, exchange, routingKey string, msg .
 			return b.NewPublisher(nil, e)
 		})
 		if err != nil {
-			return fmt.Errorf("%w: %w", ErrBroker, err)
+			return ErrBroker.Detailf("acquire publisher: %w", err)
 		}
 		defer release()
 
@@ -566,20 +570,20 @@ func (b *Broker) Transaction(ctx context.Context, fn func(Channel) error) error 
 	defer ch.Close()
 
 	if err := ch.Tx(); err != nil {
-		return internal.Wrap("transaction start", err)
+		return internal.ErrDomain.Wrap("transaction start", err)
 	}
 
 	fnErr := transport.DoSafeChannelAction(ch, fn)
 	if fnErr != nil {
 		if rbErr := ch.TxRollback(); rbErr != nil {
 			// return an error that lets callers inspect both errors
-			return internal.Wrap("transaction rollback", rbErr, fnErr)
+			return internal.ErrDomain.Wrap("transaction rollback", rbErr, fnErr)
 		}
-		return internal.Wrap("transaction function", fnErr)
+		return internal.ErrDomain.Wrap("transaction function", fnErr)
 	}
 
 	if err := ch.TxCommit(); err != nil {
-		return internal.Wrap("transaction commit", err)
+		return internal.ErrDomain.Wrap("transaction commit", err)
 	}
 
 	return nil
