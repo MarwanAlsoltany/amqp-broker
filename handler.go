@@ -7,6 +7,10 @@ import (
 )
 
 var (
+	// ErrHandler is the root sentinel for all handler operations.
+	// All handler-related errors wrap this error.
+	ErrHandler = handler.ErrHandler
+
 	// ErrMiddleware is the base error for handler middleware operations.
 	// All errors returned by middlewares wrap this error for consistent error handling.
 	ErrMiddleware = handler.ErrMiddleware
