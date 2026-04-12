@@ -1,8 +1,6 @@
 package topology
 
 import (
-	"fmt"
-
 	"github.com/MarwanAlsoltany/amqp-broker/internal/transport"
 )
 
@@ -14,7 +12,7 @@ const (
 var (
 	// ErrTopologyExchangeNameEmpty indicates an exchange name is empty.
 	// Exchange names are required for all exchange operations.
-	ErrTopologyExchangeNameEmpty = fmt.Errorf("%w: exchange name empty", ErrTopologyValidation)
+	ErrTopologyExchangeNameEmpty = ErrTopologyValidation.Derive("exchange name empty")
 )
 
 // Exchange represents an AMQP exchange with configuration and lifecycle methods.
@@ -102,7 +100,7 @@ func (e Exchange) Declare(ch transport.Channel) error {
 	})
 
 	if err != nil {
-		return fmt.Errorf("%w: exchange %q: %w", ErrTopologyDeclareFailed, e.Name, err)
+		return ErrTopologyDeclareFailed.Detailf("exchange %q: %w", e.Name, err)
 	}
 
 	return nil
@@ -134,7 +132,7 @@ func (e Exchange) Verify(ch transport.Channel) error {
 	})
 
 	if err != nil {
-		return fmt.Errorf("%w: exchange %q: %w", ErrTopologyVerifyFailed, e.Name, err)
+		return ErrTopologyVerifyFailed.Detailf("exchange %q: %w", e.Name, err)
 	}
 
 	return nil
@@ -159,7 +157,7 @@ func (e Exchange) Delete(ch transport.Channel, ifUnused bool) error {
 	})
 
 	if err != nil {
-		return fmt.Errorf("%w: exchange %q: %w", ErrTopologyDeleteFailed, e.Name, err)
+		return ErrTopologyDeleteFailed.Detailf("exchange %q: %w", e.Name, err)
 	}
 
 	return nil

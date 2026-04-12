@@ -1,14 +1,13 @@
 package topology
 
 import (
-	"fmt"
 	"strings"
 )
 
 var (
 	// ErrTopologyRoutingKeyEmpty indicates a routing key is empty.
 	// Some operations require non-empty routing keys.
-	ErrTopologyRoutingKeyEmpty = fmt.Errorf("%w: routing key empty", ErrTopologyValidation)
+	ErrTopologyRoutingKeyEmpty = ErrTopologyValidation.Derive("routing key empty")
 )
 
 // RoutingKey represents an AMQP routing key with placeholder substitution.

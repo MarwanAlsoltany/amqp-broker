@@ -1,8 +1,6 @@
 package topology
 
 import (
-	"fmt"
-
 	"github.com/MarwanAlsoltany/amqp-broker/internal/transport"
 )
 
@@ -13,7 +11,7 @@ const (
 var (
 	// ErrTopologyQueueNameEmpty indicates a queue name is empty.
 	// Queue names are required for non-exclusive queues.
-	ErrTopologyQueueNameEmpty = fmt.Errorf("%w: queue name empty", ErrTopologyValidation)
+	ErrTopologyQueueNameEmpty = ErrTopologyValidation.Derive("queue name empty")
 )
 
 // Queue represents an AMQP queue with configuration and lifecycle methods.
@@ -95,7 +93,7 @@ func (q Queue) Declare(ch transport.Channel) error {
 	})
 
 	if err != nil {
-		return fmt.Errorf("%w: queue %q: %w", ErrTopologyDeclareFailed, q.Name, err)
+		return ErrTopologyDeclareFailed.Detailf("queue %q: %w", q.Name, err)
 	}
 
 	return nil
@@ -122,7 +120,7 @@ func (q Queue) Verify(ch transport.Channel) error {
 	})
 
 	if err != nil {
-		return fmt.Errorf("%w: queue %q: %w", ErrTopologyVerifyFailed, q.Name, err)
+		return ErrTopologyVerifyFailed.Detailf("queue %q: %w", q.Name, err)
 	}
 
 	return nil
@@ -151,7 +149,7 @@ func (q Queue) Delete(ch transport.Channel, ifUnused, ifEmpty bool) (int, error)
 	})
 
 	if err != nil {
-		return count, fmt.Errorf("%w: queue %q: %w", ErrTopologyDeleteFailed, q.Name, err)
+		return count, ErrTopologyDeleteFailed.Detailf("queue %q: %w", q.Name, err)
 	}
 
 	return count, nil

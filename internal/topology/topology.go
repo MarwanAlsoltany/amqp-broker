@@ -2,7 +2,6 @@ package topology
 
 import (
 	"errors"
-	"fmt"
 
 	"github.com/MarwanAlsoltany/amqp-broker/internal"
 )
@@ -10,23 +9,23 @@ import (
 var (
 	// ErrTopology is the base error for topology operations.
 	// All topology-related errors wrap this error.
-	ErrTopology = &internal.Error{Op: "topology"}
+	ErrTopology = internal.ErrDomain.Sentinel("topology")
 
 	// ErrTopologyDeclareFailed indicates a topology declaration failed.
 	// This occurs when exchange, queue, or binding declaration is rejected by the broker.
-	ErrTopologyDeclareFailed = fmt.Errorf("%w: declare failed", ErrTopology)
+	ErrTopologyDeclareFailed = ErrTopology.Derive("declare failed")
 
 	// ErrTopologyDeleteFailed indicates a topology deletion failed.
 	// This occurs when exchange, queue, or binding deletion is rejected by the broker.
-	ErrTopologyDeleteFailed = fmt.Errorf("%w: delete failed", ErrTopology)
+	ErrTopologyDeleteFailed = ErrTopology.Derive("delete failed")
 
 	// ErrTopologyVerifyFailed indicates a topology verification failed.
 	// This occurs when passive declaration fails, meaning the entity doesn't exist.
-	ErrTopologyVerifyFailed = fmt.Errorf("%w: verify failed", ErrTopology)
+	ErrTopologyVerifyFailed = ErrTopology.Derive("verify failed")
 
 	// ErrTopologyValidation is the base error for topology validation errors.
 	// It wraps specific validation failures like empty names or missing fields.
-	ErrTopologyValidation = fmt.Errorf("%w: validation", ErrTopology)
+	ErrTopologyValidation = ErrTopology.Derive("validation")
 )
 
 // Topology is a DTO that groups exchanges, queues, and bindings for bulk operations.
@@ -167,7 +166,7 @@ func (t *Topology) Validate() error {
 	}
 
 	if err := errors.Join(errs...); err != nil {
-		return fmt.Errorf("%w: %w", ErrTopologyValidation, err)
+		return ErrTopologyValidation.Detailf("%w", err)
 	}
 
 	return nil

@@ -1,15 +1,13 @@
 package topology
 
 import (
-	"fmt"
-
 	"github.com/MarwanAlsoltany/amqp-broker/internal/transport"
 )
 
 var (
 	// ErrTopologyBindingFieldsEmpty indicates binding source or destination is empty.
 	// Both source and destination are required for all bindings.
-	ErrTopologyBindingFieldsEmpty = fmt.Errorf("%w: binding field(s) empty", ErrTopologyValidation)
+	ErrTopologyBindingFieldsEmpty = ErrTopologyValidation.Derive("binding field(s) empty")
 )
 
 // BindingType indicates whether a binding connects to a queue or exchange.
@@ -123,7 +121,7 @@ func (b Binding) Declare(ch transport.Channel) error {
 	})
 
 	if err != nil {
-		return fmt.Errorf("%w: %s binding %q -> %q: %w", ErrTopologyDeclareFailed, b.Type, b.Source, b.Destination, err)
+		return ErrTopologyDeclareFailed.Detailf("%s binding %q -> %q: %w", b.Type, b.Source, b.Destination, err)
 	}
 
 	return nil
@@ -157,7 +155,7 @@ func (b Binding) Delete(ch transport.Channel) error {
 	})
 
 	if err != nil {
-		return fmt.Errorf("%w: %s binding %q -> %q: %w", ErrTopologyDeleteFailed, b.Type, b.Source, b.Destination, err)
+		return ErrTopologyDeleteFailed.Detailf("%s binding %q -> %q: %w", b.Type, b.Source, b.Destination, err)
 	}
 
 	return nil
