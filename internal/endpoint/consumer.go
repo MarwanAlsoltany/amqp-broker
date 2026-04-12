@@ -2,11 +2,9 @@ package endpoint
 
 import (
 	"context"
-	"fmt"
 	"sync/atomic"
 	"time"
 
-	"github.com/MarwanAlsoltany/amqp-broker/internal"
 	"github.com/MarwanAlsoltany/amqp-broker/internal/handler"
 	"github.com/MarwanAlsoltany/amqp-broker/internal/message"
 	"github.com/MarwanAlsoltany/amqp-broker/internal/topology"
@@ -16,15 +14,15 @@ import (
 var (
 	// ErrConsumer is the base error for consumer operations.
 	// All consumer-specific errors wrap this error.
-	ErrConsumer = fmt.Errorf("%w consumer", ErrEndpoint)
+	ErrConsumer = ErrEndpoint.Derive("consumer")
 
 	// ErrConsumerClosed indicates the consumer is closed.
 	// This error is returned when operations are attempted on a closed consumer.
-	ErrConsumerClosed = fmt.Errorf("%w: closed", ErrConsumer)
+	ErrConsumerClosed = ErrConsumer.Derive("closed")
 
 	// ErrConsumerNotConnected indicates the consumer is not connected.
 	// This error is returned when the consumer has no active AMQP channel.
-	ErrConsumerNotConnected = fmt.Errorf("%w: not connected", ErrConsumer)
+	ErrConsumerNotConnected = ErrConsumer.Derive("not connected")
 )
 
 // Consumer defines a high-level AMQP consumer with automatic connection management,
@@ -206,7 +204,7 @@ func (c *consumer) Get() (*message.Message, error) {
 
 	delivery, ok, err := ch.Get(c.queue.Name, c.opts.AutoAck)
 	if err != nil {
-		return nil, fmt.Errorf("%w: get: %w", ErrConsumer, err)
+		return nil, ErrConsumer.Detailf("get: %w", err)
 	}
 
 	if !ok {
@@ -230,7 +228,7 @@ func (c *consumer) Cancel() error {
 
 	// c.id is the consumer tag (set when ch.Consume is called)
 	if err := ch.Cancel(c.id, false); err != nil {
-		return fmt.Errorf("%w: cancel: %w", ErrConsumer, err)
+		return ErrConsumer.Detailf("cancel: %w", err)
 	}
 
 	return nil
@@ -241,7 +239,7 @@ var _ endpointLifecycle = (*consumer)(nil)
 // init validates options and starts the consumer's connection management loop.
 func (c *consumer) init(ctx context.Context) error {
 	if err := ValidateConsumerOptions(c.opts); err != nil {
-		return fmt.Errorf("%w: %w", ErrConsumer, err)
+		return ErrConsumer.Detailf("%w", err)
 	}
 	return c.endpoint.start(ctx, c, c.opts.OnError)
 }
@@ -250,12 +248,12 @@ func (c *consumer) init(ctx context.Context) error {
 func (c *consumer) connect(ctx context.Context) error {
 	conn, err := c.connectionMgr.Assign(c.role.purpose())
 	if err != nil {
-		return internal.Wrap("assign connection", err)
+		return ErrConsumer.Detailf("assign connection: %w", err)
 	}
 
 	ch, err := conn.Channel()
 	if err != nil {
-		return internal.Wrap("open channel", err)
+		return ErrConsumer.Detailf("open channel: %w", err)
 	}
 
 	c.stateMu.Lock()
@@ -276,7 +274,7 @@ func (c *consumer) connect(ctx context.Context) error {
 	}
 	if err := ch.Qos(prefetch, 0, false); err != nil {
 		_ = ch.Close()
-		return internal.Wrap("set qos", err)
+		return ErrConsumer.Detailf("set qos: %w", err)
 	}
 
 	// start consuming; c.id is used as the consumer tag for cancel/identify
@@ -291,7 +289,7 @@ func (c *consumer) connect(ctx context.Context) error {
 	)
 	if err != nil {
 		_ = ch.Close()
-		return internal.Wrap("start consuming", err)
+		return ErrConsumer.Detailf("start consuming: %w", err)
 	}
 
 	// channels are buffered to avoid deadlocks;
@@ -326,7 +324,7 @@ func (c *consumer) disconnect(_ context.Context) error {
 	if c.ch != nil {
 		err := c.ch.Close()
 		c.ch = nil
-		return internal.Wrap("close channel", err)
+		return ErrConsumer.Detailf("close channel: %w", err)
 	}
 
 	return nil
@@ -350,7 +348,7 @@ func (c *consumer) monitor(ctx context.Context) error {
 			if !ok {
 				return nil
 			}
-			amqpErr := internal.Wrap("channel closed", err)
+			amqpErr := ErrConsumer.Detailf("channel closed: %w", err)
 			if amqpErr != nil && c.opts.OnError != nil {
 				go c.opts.OnError(amqpErr)
 			}
@@ -460,7 +458,7 @@ func (c *consumer) processMessage(ctx context.Context, msg *message.Message) {
 	action, err := c.handler(ctx, msg)
 
 	if err != nil && c.opts.OnError != nil {
-		err := fmt.Errorf("%w: handler failed for message %q: %w", ErrConsumer, msg.MessageID, err)
+		err := ErrConsumer.Detailf("handler failed for message %q: %w", msg.MessageID, err)
 		go c.opts.OnError(err)
 	}
 
@@ -481,7 +479,7 @@ func (c *consumer) processMessage(ctx context.Context, msg *message.Message) {
 	}
 
 	if ackErr != nil && c.opts.OnError != nil {
-		err := fmt.Errorf("%w: ack (action=%s) failed for message %q: %w", ErrConsumer, action.String(), msg.MessageID, ackErr)
+		err := ErrConsumer.Detailf("ack (action=%s) failed for message %q: %w", action.String(), msg.MessageID, ackErr)
 		go c.opts.OnError(err)
 	}
 }

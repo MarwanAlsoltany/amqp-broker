@@ -3,7 +3,6 @@ package endpoint
 import (
 	"context"
 	"errors"
-	"fmt"
 	"math/rand/v2"
 	"time"
 )
@@ -165,7 +164,7 @@ func (e *endpoint) run(
 			}
 
 			if !autoReconnect {
-				return fmt.Errorf("%w: %w", ErrEndpointNoAutoReconnect, err)
+				return ErrEndpointNoAutoReconnect.Detailf("%w", err)
 			}
 
 			// fail-fast on first attempt so the initial error surfaces immediately
@@ -209,7 +208,7 @@ func (e *endpoint) run(
 
 		if !autoReconnect {
 			if err != nil {
-				return fmt.Errorf("%w: %w", ErrEndpointNoAutoReconnect, err)
+				return ErrEndpointNoAutoReconnect.Detailf("%w", err)
 			}
 			return nil
 		}

@@ -3,12 +3,10 @@ package endpoint
 import (
 	"context"
 	"errors"
-	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/MarwanAlsoltany/amqp-broker/internal"
 	"github.com/MarwanAlsoltany/amqp-broker/internal/message"
 	"github.com/MarwanAlsoltany/amqp-broker/internal/topology"
 	"github.com/MarwanAlsoltany/amqp-broker/internal/transport"
@@ -17,15 +15,15 @@ import (
 var (
 	// ErrPublisher is the base error for publisher operations.
 	// All publisher-specific errors wrap this error.
-	ErrPublisher = fmt.Errorf("%w publisher", ErrEndpoint)
+	ErrPublisher = ErrEndpoint.Derive("publisher")
 
 	// ErrPublisherClosed indicates the publisher is closed.
 	// This error is returned when operations are attempted on a closed publisher.
-	ErrPublisherClosed = fmt.Errorf("%w: closed", ErrPublisher)
+	ErrPublisherClosed = ErrPublisher.Derive("closed")
 
 	// ErrPublisherNotConnected indicates the publisher is not connected.
 	// This error is returned when the publisher has no active AMQP channel.
-	ErrPublisherNotConnected = fmt.Errorf("%w: not connected", ErrPublisher)
+	ErrPublisherNotConnected = ErrPublisher.Derive("not connected")
 )
 
 // Publisher defines a high-level AMQP publisher with automatic connection management,
@@ -179,7 +177,7 @@ func (p *publisher) Publish(ctx context.Context, rk topology.RoutingKey, msgs ..
 	}
 
 	if !p.flow.Load() {
-		return fmt.Errorf("%w: %s", ErrPublisher, "flow paused by server")
+		return ErrPublisher.Detail("flow paused by server")
 	}
 
 	for i, msg := range msgs {
@@ -196,7 +194,7 @@ func (p *publisher) Publish(ctx context.Context, rk topology.RoutingKey, msgs ..
 				pub,
 			)
 			if err != nil {
-				return fmt.Errorf("%w: message %d publish failed: %w", ErrPublisher, i, err)
+				return ErrPublisher.Detailf("message %d publish failed: %w", i, err)
 			}
 			p.opts.OnConfirm(conf.DeliveryTag, func(ctx context.Context) bool {
 				if ctx != nil {
@@ -219,7 +217,7 @@ func (p *publisher) Publish(ctx context.Context, rk topology.RoutingKey, msgs ..
 				pub,
 			)
 			if err != nil {
-				return fmt.Errorf("%w: message %d publish failed: %w", ErrPublisher, i, err)
+				return ErrPublisher.Detailf("message %d publish failed: %w", i, err)
 			}
 		}
 	}
@@ -231,7 +229,7 @@ func (p *publisher) Publish(ctx context.Context, rk topology.RoutingKey, msgs ..
 		p.stateMu.RUnlock()
 
 		if confirmCh == nil {
-			return fmt.Errorf("%w: %s", ErrPublisherNotConnected, "confirmation channel not available")
+			return ErrPublisherNotConnected.Detail("confirmation channel not available")
 		}
 
 		timeout := p.opts.ConfirmTimeout
@@ -243,12 +241,12 @@ func (p *publisher) Publish(ctx context.Context, rk topology.RoutingKey, msgs ..
 			select {
 			case c := <-confirmCh:
 				if !c.Ack {
-					return fmt.Errorf("%w: message %d not confirmed by server", ErrPublisher, i)
+					return ErrPublisher.Detailf("message %d not confirmed by server", i)
 				}
 			case <-ctx.Done():
 				return ctx.Err()
 			case <-time.After(timeout):
-				return fmt.Errorf("%w: message %d confirm timeout", ErrPublisher, i)
+				return ErrPublisher.Detailf("message %d confirm timeout", i)
 			}
 		}
 	}
@@ -261,7 +259,7 @@ var _ endpointLifecycle = (*publisher)(nil)
 // init validates options and starts the publisher's connection management loop.
 func (p *publisher) init(ctx context.Context) error {
 	if err := ValidatePublisherOptions(p.opts); err != nil {
-		return fmt.Errorf("%w: %w", ErrPublisher, err)
+		return ErrPublisher.Detailf("%w", err)
 	}
 	return p.endpoint.start(ctx, p, p.opts.OnError)
 }
@@ -270,12 +268,12 @@ func (p *publisher) init(ctx context.Context) error {
 func (p *publisher) connect(ctx context.Context) error {
 	conn, err := p.connectionMgr.Assign(p.role.purpose())
 	if err != nil {
-		return internal.Wrap("assign connection", err)
+		return ErrPublisher.Detailf("assign connection: %w", err)
 	}
 
 	ch, err := conn.Channel()
 	if err != nil {
-		return internal.Wrap("open channel", err)
+		return ErrPublisher.Detailf("open channel: %w", err)
 	}
 
 	p.stateMu.Lock()
@@ -304,11 +302,16 @@ func (p *publisher) connect(ctx context.Context) error {
 	if p.opts.ConfirmMode {
 		if err := ch.Confirm(false); err != nil {
 			_ = ch.Close()
-			return internal.Wrap("enable confirm mode", err)
+			return ErrPublisher.Detailf("enable confirm mode: %w", err)
 		}
-		// ch.NotifyPublish preserves strict ack/nack ordering;
-		// must be consumed to avoid deadlocks
-		confirmCh = ch.NotifyPublish(make(chan transport.Confirmation))
+		// ch.NotifyPublish preserves strict ack/nack ordering; must be drained to avoid deadlocks;
+		// in deferred mode a dedicated goroutine (handleConfirmations) drains it continuously,
+		// so the buffer only needs to cover scheduling jitter; in batch mode Publish() is
+		// the sole reader and only drains after all messages are sent; theoretically,
+		// if the server acks faster than the send loop and more than 256 messages
+		// are published in one call, the buffer fills and blocks the dispatch loop; increase
+		// the buffer if publishing batches larger than 256 messages in batch confirm mode.
+		confirmCh = ch.NotifyPublish(make(chan transport.Confirmation, 256 /*2^8*/))
 	}
 
 	p.stateMu.Lock()
@@ -343,7 +346,7 @@ func (p *publisher) disconnect(_ context.Context) error {
 	if p.ch != nil {
 		err := p.ch.Close()
 		p.ch = nil
-		return internal.Wrap("close channel", err)
+		return ErrPublisher.Detailf("close channel: %w", err)
 	}
 
 	return nil
@@ -367,37 +370,11 @@ func (p *publisher) monitor(ctx context.Context) error {
 			if !ok {
 				return nil
 			}
-			amqpErr := internal.Wrap("channel closed", err)
+			amqpErr := ErrPublisher.Detailf("channel closed: %w", err)
 			if amqpErr != nil && p.opts.OnError != nil {
 				go p.opts.OnError(amqpErr)
 			}
 			return amqpErr
-		}
-	}
-}
-
-// handleReturns processes undeliverable messages returned by the server.
-func (p *publisher) handleReturns(ctx context.Context) {
-	for {
-		p.stateMu.RLock()
-		returnCh := p.returnCh
-		p.stateMu.RUnlock()
-
-		if returnCh == nil {
-			return
-		}
-
-		select {
-		case <-ctx.Done():
-			return
-		case r, ok := <-returnCh:
-			if !ok {
-				return
-			}
-			if p.opts.OnReturn != nil {
-				msg := returnToMessage(&r)
-				go p.opts.OnReturn(msg)
-			}
 		}
 	}
 }
@@ -428,16 +405,37 @@ func (p *publisher) handleFlow(ctx context.Context) {
 	}
 }
 
+// handleReturns processes undeliverable messages returned by the server.
+func (p *publisher) handleReturns(ctx context.Context) {
+	for {
+		p.stateMu.RLock()
+		returnCh := p.returnCh
+		p.stateMu.RUnlock()
+
+		if returnCh == nil {
+			return
+		}
+
+		select {
+		case <-ctx.Done():
+			return
+		case r, ok := <-returnCh:
+			if !ok {
+				return
+			}
+			if p.opts.OnReturn != nil {
+				msg := returnToMessage(&r)
+				go p.opts.OnReturn(msg)
+			}
+		}
+	}
+}
+
 // handleConfirmations drains the confirmation channel to prevent deadlocks.
-//
-// In deferred confirmation mode the broker still sends one amqp.Confirmation per
-// published message into confirmCh, exactly as in batch mode. The amqp091 library
-// applies back-pressure to the publisher once this channel's buffer fills: if nobody
-// is reading from it, subsequent PublishWithDeferredConfirmWithContext calls will block
-// indefinitely, deadlocking the publisher. The actual confirmation result is obtained
-// via amqp.DeferredConfirmation.Wait()/WaitContext() by the OnConfirm callback, the
-// values arriving on confirmCh are redundant in this mode and are intentionally discarded.
-func (p *publisher) handleConfirmations(ctx context.Context) {
+// In deferred confirmation mode the broker sends one Confirmation per published
+// message into confirmCh; values here are redundant, the actual result is obtained
+// via DeferredConfirmation.Wait()/WaitContext() by the OnConfirm callback.
+func (p *publisher) handleConfirmations(_ context.Context) {
 	for {
 		p.stateMu.RLock()
 		confirmCh := p.confirmCh
@@ -448,13 +446,21 @@ func (p *publisher) handleConfirmations(ctx context.Context) {
 		}
 
 		select {
-		case <-ctx.Done():
-			return
+		// NOTE: ctx.Done() is intentionally excluded from this select,
+		// returning early on cancellation would leave the amqp091-go dispatch loop
+		// unable to deliver any pending confirm, blocking it permanently and causing
+		// ch.Close() to deadlock waiting for channel.close-ok (reproduces as a
+		// X-minute timeout on slow runners)
+		// this goroutine must drain until amqp091-go itself closes confirmCh,
+		// which happens inside ch.Close(), if the buffer fills before that
+		// (see NotifyPublish comment in connect()), increase the buffer capacity
+		// case <-ctx.Done():
+		//	return
 		case _, ok := <-confirmCh:
 			if !ok {
 				return
 			}
-			// discard: amqp.DeferredConfirmation handles the actual confirmation
+			// discard: DeferredConfirmation handles the actual result
 		}
 	}
 }

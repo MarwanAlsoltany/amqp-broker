@@ -2,7 +2,6 @@ package endpoint
 
 import (
 	"context"
-	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -15,23 +14,23 @@ import (
 var (
 	// ErrEndpoint is the base error for endpoint operations.
 	// All endpoint-related errors wrap this error.
-	ErrEndpoint = &internal.Error{Op: "endpoint"}
+	ErrEndpoint = internal.ErrDomain.Sentinel("endpoint")
 
 	// ErrEndpointClosed indicates the endpoint is closed.
 	// This error is returned when operations are attempted on a closed endpoint.
-	ErrEndpointClosed = fmt.Errorf("%w: closed", ErrEndpoint)
+	ErrEndpointClosed = ErrEndpoint.Derive("closed")
 
 	// ErrEndpointNotConnected indicates the endpoint is not connected.
 	// This error is returned when the endpoint has no active AMQP channel.
-	ErrEndpointNotConnected = fmt.Errorf("%w: not connected", ErrEndpoint)
+	ErrEndpointNotConnected = ErrEndpoint.Derive("not connected")
 
 	// ErrEndpointNotReadyTimeout indicates the endpoint did not become ready within the timeout.
 	// This occurs when the endpoint fails to establish a connection in time.
-	ErrEndpointNotReadyTimeout = fmt.Errorf("%w: not ready within timeout", ErrEndpoint)
+	ErrEndpointNotReadyTimeout = ErrEndpoint.Derive("not ready within timeout")
 
 	// ErrEndpointNoAutoReconnect indicates the endpoint lost its connection and auto-reconnect is disabled.
 	// When auto-reconnect is disabled, connection loss is a terminal error.
-	ErrEndpointNoAutoReconnect = fmt.Errorf("%w: connection lost: auto-reconnect is disabled", ErrEndpoint)
+	ErrEndpointNoAutoReconnect = ErrEndpoint.Derive("connection lost: auto-reconnect is disabled")
 )
 
 // Endpoint defines the common interface for AMQP publishers and consumers, providing access
@@ -223,7 +222,7 @@ func (e *endpoint) Close() error {
 		err := e.ch.Close()
 		e.ch = nil
 		if err != nil {
-			return fmt.Errorf("%w: close failed: %w", ErrEndpoint, err)
+			return ErrEndpoint.Detailf("close failed: %w", err)
 		}
 	}
 
