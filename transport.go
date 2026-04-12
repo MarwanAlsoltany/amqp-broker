@@ -5,6 +5,10 @@ import (
 )
 
 var (
+	// ErrTransport is the base error for transport operations.
+	// All transport-related errors wrap this error.
+	ErrTransport = transport.ErrTransport
+
 	// ErrConnection is the base error for connection operations.
 	// All connection-related errors wrap this error.
 	ErrConnection = transport.ErrConnection
