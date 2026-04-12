@@ -3,7 +3,14 @@ package handler
 import (
 	"context"
 
+	"github.com/MarwanAlsoltany/amqp-broker/internal"
 	"github.com/MarwanAlsoltany/amqp-broker/internal/message"
+)
+
+var (
+	// ErrHandler is the base error for handler operations.
+	// All handler-related errors wrap this error for consistent error handling.
+	ErrHandler = internal.ErrDomain.Sentinel("handler")
 )
 
 // Action controls how a consumed message is acknowledged.

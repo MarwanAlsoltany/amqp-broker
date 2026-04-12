@@ -2,7 +2,6 @@ package handler
 
 import (
 	"context"
-	"fmt"
 	"time"
 
 	"github.com/MarwanAlsoltany/amqp-broker/internal/message"
@@ -72,7 +71,7 @@ func ConcurrencyMiddleware(cfg *ConcurrencyMiddlewareConfig) Middleware {
 				}
 				select {
 				case <-ctx.Done():
-					return action, fmt.Errorf("%w: %w", ErrMiddleware, ctx.Err())
+					return action, ErrMiddleware.Detailf("%w", ctx.Err())
 				case semaphore <- struct{}{}:
 					if cfg.OnAcquire != nil {
 						cfg.OnAcquire(ctx, msg)
@@ -160,7 +159,7 @@ func RateLimitMiddleware(ctx context.Context, cfg *RateLimitMiddlewareConfig) Mi
 		return func(ctx context.Context, msg *message.Message) (Action, error) {
 			select {
 			case <-ctx.Done():
-				return ActionNackRequeue, fmt.Errorf("%w: %w", ErrMiddleware, ctx.Err())
+				return ActionNackRequeue, ErrMiddleware.Detailf("%w", ctx.Err())
 			case <-tokens:
 			}
 			return next(ctx, msg)

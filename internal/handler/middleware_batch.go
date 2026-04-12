@@ -2,7 +2,6 @@ package handler
 
 import (
 	"context"
-	"fmt"
 	"iter"
 	"sync"
 	"time"
@@ -266,7 +265,7 @@ func batchSync(ctx context.Context, bh BatchHandler, cfg *BatchConfig) Middlewar
 			case o := <-ch:
 				return o.action, o.err
 			case <-msgCtx.Done():
-				return ActionNackRequeue, fmt.Errorf("%w: %w", ErrMiddleware, msgCtx.Err())
+				return ActionNackRequeue, ErrMiddleware.Detailf("%w", msgCtx.Err())
 			}
 		}
 	}
@@ -378,7 +377,7 @@ func batchAsync(ctx context.Context, bh BatchHandler, cfg *BatchConfig) Middlewa
 				return cfg.EnqueueAction, nil
 			default:
 				// buffer full: cannot enqueue
-				bufErr := fmt.Errorf("%w: batching buffer full", ErrMiddleware)
+				bufErr := ErrMiddleware.Detail("batching buffer full")
 				if cfg.EnqueueAction == ActionNoAction {
 					// hold-ack mode: we own this message's ack
 					applyAction(cfg.ErrorAction, msg)

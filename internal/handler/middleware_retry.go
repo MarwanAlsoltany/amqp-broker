@@ -2,7 +2,6 @@ package handler
 
 import (
 	"context"
-	"fmt"
 	"math/rand/v2"
 	"sync"
 	"time"
@@ -86,7 +85,7 @@ func RetryMiddleware(cfg *RetryMiddlewareConfig) Middleware {
 				// check if context is already cancelled
 				select {
 				case <-ctx.Done():
-					return ActionNackRequeue, fmt.Errorf("%w: %w", ErrMiddleware, ctx.Err())
+					return ActionNackRequeue, ErrMiddleware.Detailf("%w", ctx.Err())
 				default:
 				}
 
@@ -108,7 +107,7 @@ func RetryMiddleware(cfg *RetryMiddlewareConfig) Middleware {
 				// wait before retry (with context cancellation check)
 				select {
 				case <-ctx.Done():
-					return ActionNackRequeue, fmt.Errorf("%w: %w", ErrMiddleware, ctx.Err())
+					return ActionNackRequeue, ErrMiddleware.Detailf("%w", ctx.Err())
 				case <-time.After(backoff):
 				}
 
@@ -247,13 +246,13 @@ func CircuitBreakerMiddleware(cfg *CircuitBreakerMiddlewareConfig) Middleware {
 				} else {
 					// still open, reject immediately
 					mu.Unlock()
-					return cfg.Action, fmt.Errorf("%w: circuit open", ErrMiddleware)
+					return cfg.Action, ErrMiddleware.Detail("circuit open")
 				}
 			case circuitHalfOpen:
 				// gate: only allow MaxProbes concurrent probes through
 				if halfOpenInFlight >= cfg.MaxProbes {
 					mu.Unlock()
-					return cfg.Action, fmt.Errorf("%w: circuit half-open", ErrMiddleware)
+					return cfg.Action, ErrMiddleware.Detail("circuit half-open")
 				}
 				halfOpenInFlight++
 				tookHalfOpenSlot = true

@@ -2,7 +2,6 @@ package handler
 
 import (
 	"context"
-	"fmt"
 	"time"
 
 	"github.com/MarwanAlsoltany/amqp-broker/internal/message"
@@ -126,7 +125,7 @@ func ValidationMiddleware(cfg *ValidationMiddlewareConfig) Middleware {
 	return func(next Handler) Handler {
 		return func(ctx context.Context, msg *message.Message) (Action, error) {
 			if err := cfg.Validate(msg); err != nil {
-				return errAction, fmt.Errorf("%w: validation failed: %w", ErrMiddleware, err)
+				return errAction, ErrMiddleware.Detailf("validation failed: %w", err)
 			}
 			return next(ctx, msg)
 		}
@@ -183,7 +182,7 @@ func TransformMiddleware(cfg *TransformMiddlewareConfig) Middleware {
 		return func(ctx context.Context, msg *message.Message) (Action, error) {
 			transformed, err := cfg.Transform(ctx, msg.Body)
 			if err != nil {
-				return errAction, fmt.Errorf("%w: body transform failed: %w", ErrMiddleware, err)
+				return errAction, ErrMiddleware.Detailf("body transform failed: %w", err)
 			}
 			msg.Body = transformed
 			return next(ctx, msg)
@@ -250,7 +249,7 @@ func DeadlineMiddleware(cfg *DeadlineMiddlewareConfig) Middleware {
 		return func(ctx context.Context, msg *message.Message) (Action, error) {
 			if deadline, ok := timestamp(msg); ok {
 				if time.Now().After(deadline) {
-					return expAction, fmt.Errorf("%w: message expired at %v", ErrMiddleware, deadline)
+					return expAction, ErrMiddleware.Detailf("message expired at %v", deadline)
 				}
 			}
 			// no deadline or deadline in future
@@ -303,6 +302,15 @@ func TimeoutMiddleware(cfg *TimeoutMiddlewareConfig) Middleware {
 			ctx, cancel := context.WithTimeout(ctx, cfg.Timeout)
 			defer cancel()
 
+			// fast path: context already cancelled/timed-out on entry;
+			// avoids a non-deterministic select race when both ctx.Done()
+			// and the handler result channel are ready at the same time
+			select {
+			case <-ctx.Done():
+				return timeoutAction, ErrMiddleware.Detailf("message processing timeout after %vms", cfg.Timeout.Milliseconds())
+			default:
+			}
+
 			type result struct {
 				action Action
 				err    error
@@ -318,7 +326,7 @@ func TimeoutMiddleware(cfg *TimeoutMiddlewareConfig) Middleware {
 			case result := <-resultCh:
 				return result.action, result.err
 			case <-ctx.Done():
-				return timeoutAction, fmt.Errorf("%w: message processing timeout after %vms", ErrMiddleware, cfg.Timeout.Milliseconds())
+				return timeoutAction, ErrMiddleware.Detailf("message processing timeout after %vms", cfg.Timeout.Milliseconds())
 			}
 		}
 	}

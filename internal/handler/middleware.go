@@ -1,13 +1,9 @@
 package handler
 
-import (
-	"github.com/MarwanAlsoltany/amqp-broker/internal"
-)
-
 var (
 	// ErrMiddleware is the base error for handler middleware operations.
 	// All errors returned by middlewares wrap this error for consistent error handling.
-	ErrMiddleware = &internal.Error{Op: "middleware"}
+	ErrMiddleware = ErrHandler.Derive("middleware")
 )
 
 // Log field constants for structured logging attributes.

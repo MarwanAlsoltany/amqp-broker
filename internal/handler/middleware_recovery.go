@@ -68,7 +68,7 @@ func RecoveryMiddleware(cfg *RecoveryMiddlewareConfig) Middleware {
 					}
 
 					action = panicAction
-					err = fmt.Errorf("%w: recovered panic: %v", ErrMiddleware, r)
+					err = ErrMiddleware.Detailf("recovered panic: %v", r)
 				}
 			}()
 			return next(ctx, msg)
