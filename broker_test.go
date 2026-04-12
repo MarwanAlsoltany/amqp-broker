@@ -768,16 +768,15 @@ func TestSentinelErrors(t *testing.T) {
 		assert.ErrorIs(t, ErrBrokerConfigInvalid, ErrBroker)
 	})
 
-	t.Run("Connection", func(t *testing.T) {
-		assert.ErrorIs(t, ErrConnection, ErrBroker)
+	t.Run("Transport", func(t *testing.T) {
+		assert.ErrorIs(t, ErrTransport, ErrBroker)
+
+		assert.ErrorIs(t, ErrConnection, ErrTransport)
 		assert.ErrorIs(t, ErrConnectionClosed, ErrConnection)
 		assert.ErrorIs(t, ErrConnectionManager, ErrConnection)
 		assert.ErrorIs(t, ErrConnectionManagerClosed, ErrConnectionManager)
-	})
 
-	t.Run("Channel", func(t *testing.T) {
-		assert.ErrorIs(t, ErrChannel, ErrBroker)
-		assert.ErrorIs(t, ErrChannel, ErrConnection)
+		assert.ErrorIs(t, ErrChannel, ErrTransport)
 		assert.ErrorIs(t, ErrChannelClosed, ErrChannel)
 	})
 
@@ -792,28 +791,36 @@ func TestSentinelErrors(t *testing.T) {
 		assert.ErrorIs(t, ErrTopologyBindingFieldsEmpty, ErrTopology)
 	})
 
-	t.Run("Endpoint", func(t *testing.T) {
-		assert.ErrorIs(t, ErrEndpoint, ErrBroker)
-		assert.ErrorIs(t, ErrEndpointClosed, ErrEndpoint)
-		assert.ErrorIs(t, ErrEndpointNotConnected, ErrEndpoint)
-		assert.ErrorIs(t, ErrEndpointNotReadyTimeout, ErrEndpoint)
-		assert.ErrorIs(t, ErrEndpointNoAutoReconnect, ErrEndpoint)
-	})
-
-	t.Run("Publisher", func(t *testing.T) {
-		assert.ErrorIs(t, ErrPublisher, ErrBroker)
-		assert.ErrorIs(t, ErrPublisherClosed, ErrPublisher)
-	})
-
-	t.Run("Consumer", func(t *testing.T) {
-		assert.ErrorIs(t, ErrConsumer, ErrBroker)
-		assert.ErrorIs(t, ErrConsumerClosed, ErrConsumer)
-	})
-
 	t.Run("Message", func(t *testing.T) {
 		assert.ErrorIs(t, ErrMessage, ErrBroker)
 		assert.ErrorIs(t, ErrMessageBuild, ErrMessage)
 		assert.ErrorIs(t, ErrMessageNotConsumed, ErrMessage)
 		assert.ErrorIs(t, ErrMessageNotPublished, ErrMessage)
 	})
+
+	t.Run("Handler", func(t *testing.T) {
+		assert.ErrorIs(t, ErrHandler, ErrBroker)
+		assert.ErrorIs(t, ErrMiddleware, ErrHandler)
+	})
+
+	t.Run("Endpoint", func(t *testing.T) {
+		assert.ErrorIs(t, ErrEndpoint, ErrBroker)
+		assert.ErrorIs(t, ErrEndpointClosed, ErrEndpoint)
+		assert.ErrorIs(t, ErrEndpointNotConnected, ErrEndpoint)
+		assert.ErrorIs(t, ErrEndpointNotReadyTimeout, ErrEndpoint)
+		assert.ErrorIs(t, ErrEndpointNoAutoReconnect, ErrEndpoint)
+
+		t.Run("Publisher", func(t *testing.T) {
+			assert.ErrorIs(t, ErrPublisher, ErrBroker)
+			assert.ErrorIs(t, ErrPublisherClosed, ErrPublisher)
+			assert.ErrorIs(t, ErrPublisherNotConnected, ErrPublisher)
+		})
+
+		t.Run("Consumer", func(t *testing.T) {
+			assert.ErrorIs(t, ErrConsumer, ErrBroker)
+			assert.ErrorIs(t, ErrConsumerClosed, ErrConsumer)
+			assert.ErrorIs(t, ErrConsumerNotConnected, ErrConsumer)
+		})
+	})
+
 }
