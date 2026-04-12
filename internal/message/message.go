@@ -2,7 +2,6 @@ package message
 
 import (
 	"encoding/json"
-	"fmt"
 	"maps"
 	"time"
 
@@ -17,19 +16,15 @@ const (
 var (
 	// ErrMessage is the base error for message operations.
 	// All message-related errors wrap this error.
-	ErrMessage = &internal.Error{Op: "message"}
-
-	// ErrMessageBuild indicates a message build operation failed.
-	// This occurs when [MessageBuilder.Build] fails validation or encoding.
-	ErrMessageBuild = fmt.Errorf("%w: build failed", ErrMessage)
+	ErrMessage = internal.ErrDomain.Sentinel("message")
 
 	// ErrMessageNotConsumed indicates the operation requires a consumed (incoming) message.
 	// Some operations like getting [DeliveryInfo] are only valid for consumed messages.
-	ErrMessageNotConsumed = fmt.Errorf("%w: not a consumed message (incoming)", ErrMessage)
+	ErrMessageNotConsumed = ErrMessage.Derive("not a consumed message (incoming)")
 
 	// ErrMessageNotPublished indicates the operation requires a published (outgoing) message.
 	// Some operations like getting [ReturnInfo] are only valid for published messages.
-	ErrMessageNotPublished = fmt.Errorf("%w: not a published message (outgoing)", ErrMessage)
+	ErrMessageNotPublished = ErrMessage.Derive("not a published message (outgoing)")
 )
 
 // Acknowledger abstracts AMQP delivery acknowledgment.

@@ -7,6 +7,12 @@ import (
 	"time"
 )
 
+var (
+	// ErrMessageBuild indicates a message build operation failed.
+	// This occurs when [MessageBuilder.Build] fails validation or encoding.
+	ErrMessageBuild = ErrMessage.Derive("build failed")
+)
+
 // Builder provides a fluent interface for constructing messages.
 // It supports method chaining for configuring all message properties.
 //
@@ -209,7 +215,7 @@ func (b *Builder) Reset() {
 // If any errors were accumulated during building, they are wrapped with [ErrMessageBuild].
 func (b *Builder) Build() (Message, error) {
 	if b.err != nil {
-		return *b.msg, fmt.Errorf("%w: %w", ErrMessageBuild, b.err)
+		return *b.msg, ErrMessageBuild.Detailf("%w", b.err)
 	}
 	return *b.msg, nil
 }
