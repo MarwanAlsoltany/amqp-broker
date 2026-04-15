@@ -1,0 +1,80 @@
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  schedule:
+    - cron: '0 9 1 * *' # 09:00 UTC on the 1st of every month
+
+name: CI
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test (Go ${{ matrix.go }} on ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        go: ['1.25', 'stable']
+        os: [ubuntu-latest]
+        include:
+          # smoke-test on other OSes with the minimum version only
+          - go: '1.25'
+            os: macos-latest
+          - go: '1.25'
+            os: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Go ${{ matrix.go }}
+        uses: actions/setup-go@v6
+        with:
+          go-version: ${{ matrix.go }}
+          cache: true
+
+      - name: Verify modules
+        run: go mod verify
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test -race -count=1 ./...
+
+  test-integration:
+    name: Test Integration (Go ${{ matrix.go }} with RabbitMQ ${{ matrix.rabbitmq }})
+    needs: test
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        go: ['1.25', 'stable']
+        rabbitmq: ['3', '4']
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Go ${{ matrix.go }}
+        uses: actions/setup-go@v6
+        with:
+          go-version: ${{ matrix.go }}
+          cache: true
+
+      - name: Test (integration)
+        env:
+          RABBITMQ_VERSION: ${{ matrix.rabbitmq }}
+        run: go test -v -race -count=1 -tags=integration -coverprofile=coverage.out ./...
+
+      - name: Upload coverage
+        if: matrix.go == 'stable' && matrix.rabbitmq == '3'
+        uses: codecov/codecov-action@v6
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: coverage.out
+          fail_ci_if_error: false
