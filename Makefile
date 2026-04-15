@@ -15,7 +15,7 @@ VERSION ?= latest
 .DEFAULT_GOAL := help
 
 .PHONY: help \
-	build test test-coverage test-integration lint format tidy clean
+	build test test-coverage test-integration lint format tidy check clean
 
 # ---------------------
 
@@ -76,6 +76,15 @@ tidy: ## Tidy and verify project dependencies
 	@echo "Tidying ..."
 	go mod tidy
 	go mod verify
+
+check: ## Check project dependencies for updates (direct and outdated)
+	@echo "Checking for outdated dependencies ..."
+	@out=$$(go list -u -m -json all | jq -r 'select(.Main != true and .Indirect != true and .Update != null) | "\(.Path) \((if .Version == null then "(devel)" else .Version end)) -> \(.Update.Version)"'); \
+	if [ -z "$$out" ]; then \
+		echo "All modules up to date"; \
+	else \
+		echo "$$out"; \
+	fi
 
 clean: ## Clean build artifacts
 	@echo "Cleaning ..."
