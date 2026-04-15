@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Documentation
+    url: https://pkg.go.dev/github.com/MarwanAlsoltany/amqp-broker
+    about: Read the full API reference on pkg.go.dev.
