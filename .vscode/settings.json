@@ -1,0 +1,18 @@
+{
+  "go.buildTags": "integration",
+  "go.testTags": "integration",
+  "go.toolsEnvVars": {
+    "GOFLAGS": "-tags=integration"
+  },
+  "cSpell.words": [
+    "serrors",
+    "Wrapf",
+    "Withf",
+    "Detailf",
+  ],
+  "github.copilot.chat.commitMessageGeneration.instructions": [
+    {
+      "text": "Generate commit messages in Conventional Commits format: type(scope): short summary. Use feat, fix, docs, refactor, test, chore, or perf.",
+    },
+  ],
+}
