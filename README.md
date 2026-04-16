@@ -8,6 +8,32 @@
   <strong>A proper Go API for RabbitMQ.</strong>
 </p>
 
+<p align="center">
+  <a href="https://pkg.go.dev/github.com/MarwanAlsoltany/amqp-broker">
+    <img src="https://pkg.go.dev/badge/github.com/MarwanAlsoltany/amqp-broker.svg" alt="Go Reference" />
+  </a>
+  &nbsp;
+  <a href="https://goreportcard.com/report/github.com/MarwanAlsoltany/amqp-broker">
+    <img src="https://goreportcard.com/badge/github.com/MarwanAlsoltany/amqp-broker" alt="Go Report Card" />
+  </a>
+  &nbsp;
+  <a href="https://github.com/MarwanAlsoltany/amqp-broker/actions/workflows/ci.yml">
+    <img src="https://github.com/MarwanAlsoltany/amqp-broker/actions/workflows/ci.yml/badge.svg?branch=master" alt="CI" />
+  </a>
+  &nbsp;
+  <a href="https://codecov.io/gh/MarwanAlsoltany/amqp-broker">
+    <img src="https://codecov.io/gh/MarwanAlsoltany/amqp-broker/branch/master/graph/badge.svg" alt="Coverage" />
+  </a>
+  &nbsp;
+  <a href="https://github.com/MarwanAlsoltany/amqp-broker/releases/latest">
+    <img src="https://img.shields.io/github/v/release/MarwanAlsoltany/amqp-broker?label=version&color=blue" alt="Latest Release" />
+  </a>
+  &nbsp;
+  <a href="https://github.com/MarwanAlsoltany/amqp-broker/blob/master/LICENSE">
+    <img src="https://img.shields.io/github/license/MarwanAlsoltany/amqp-broker" alt="License" />
+  </a>
+</p>
+
 ---
 
 AMQP Broker is a library for AMQP 0.9.1. It models the broker domain as first-class entities (exchanges, queues, bindings, publishers, consumers, messages, and handlers) so you declare intent, not protocol steps. Connection pooling, reconnection on failure, topology (re)application, and acknowledgment lifecycle are all handled for you.
