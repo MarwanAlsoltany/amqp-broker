@@ -1,0 +1,39 @@
+on:
+  push:
+    tags:
+      - 'v*'
+
+name: Release
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Create
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Generate Release Notes
+        uses: orhun/git-cliff-action@v4
+        id: cliff
+        with:
+          config: cliff.toml
+          # --latest: only the commits belonging to the latest tag
+          # --strip header: omit the "# Changelog" header (release body only)
+          args: --latest --strip header --output RELEASE_NOTES.md
+        env:
+          GITHUB_REPO: ${{ github.repository }}
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v3
+        if: github.ref_type == 'tag'
+        with:
+          make_latest: true
+          body_path: RELEASE_NOTES.md
+          token: ${{ secrets.GITHUB_TOKEN }}
