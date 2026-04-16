@@ -1,0 +1,200 @@
+# git-cliff configuration
+# https://git-cliff.org/docs/configuration
+# https://github.com/orhun/git-cliff/blob/main/config/cliff.toml
+# https://github.com/orhun/git-cliff/blob/main/git-cliff-core/src/config.rs
+
+[changelog]
+# For Tera templates, see https://keats.github.io/tera/docs/#introduction
+# Use GitHub Actions variables (available when running in CI):
+# {{ get_env(name="GITHUB_SERVER_URL", default="https://github.com") }}/{{ get_env(name="GITHUB_REPOSITORY", default="MarwanAlsoltany/amqp-broker") }}/releases/tag/{{ version }}
+
+# A Tera template to be rendered for each release in the changelog.
+header = """
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+"""
+
+# A Tera template to be rendered for each release in the changelog.
+body = """
+{% if version %}\
+## [{{ version | trim_start_matches(pat="v") }}] - {{ timestamp | date(format="%Y-%m-%d") }}
+{% else %}\
+## [Unreleased]
+{% endif %}
+{% for group, commits in commits | filter(attribute="merge_commit", value=false) | group_by(attribute="group") %}\
+
+### {{ group | striptags | trim | upper_first }}
+
+{% for scope, scope_commits in commits | unique(attribute="message") | group_by(attribute="scope") %}\
+- **{% if scope %}{{ scope }}{% else %}general{% endif %}**
+{% for commit in scope_commits %}\
+{{"  "}}- {{ commit.message | upper_first }}{% if commit.breaking %} (**breaking**){% endif %}
+{% endfor -%}
+{% endfor %}
+{% endfor %}
+"""
+
+# A Tera template to be rendered for each release in the changelog.
+footer = """
+{% for release in releases -%}
+{% if release.version -%}
+{% if release.previous.version -%}
+[{{ release.version | trim_start_matches(pat="v") }}]: \
+{{ get_env(name="GITHUB_SERVER_URL", default="https://github.com") }}/{{ get_env(name="GITHUB_REPOSITORY", default="MarwanAlsoltany/amqp-broker") }}/compare/{{ release.previous.version }}...{{ release.version }}
+{%- else %}
+[{{ release.version | trim_start_matches(pat="v") }}]: \
+{{ get_env(name="GITHUB_SERVER_URL", default="https://github.com") }}/{{ get_env(name="GITHUB_REPOSITORY", default="MarwanAlsoltany/amqp-broker") }}/releases/tag/{{ release.version }}
+{%- endif -%}
+{%- else -%}
+[Unreleased]: {{ get_env(name="GITHUB_SERVER_URL", default="https://github.com") }}/{{ get_env(name="GITHUB_REPOSITORY", default="MarwanAlsoltany/amqp-broker") }}/compare/\
+{{ release.previous.version }}...HEAD
+{%- endif -%}
+{%- endfor %}"""
+
+# Remove leading and trailing whitespaces from the changelog's body.
+trim = true
+# Render body even when there are no releases to process.
+render_always = true
+# An array of regex based postprocessors to modify the changelog.
+postprocessors = [
+    # Replace the placeholder <REPO> with a URL.
+    # { pattern = '<REPO>', replace = "https://github.com/MarwanAlsoltany/amqp-broker" },
+    # { pattern = '#([0-9]+)', replace = "[#${1}](https://github.com/MarwanAlsoltany/amqp-broker/issues/${1})" },
+]
+# Output file path.
+output = "CHANGELOG.md"
+
+[git]
+# Parse commits according to the conventional commits specification.
+# See https://www.conventionalcommits.org
+conventional_commits = true
+# Require all commits to be conventional. Takes precedence over filter_unconventional.
+require_conventional = false
+# Exclude commits that do not match the conventional commits specification.
+filter_unconventional = false
+# Split commits on newlines, treating each line as an individual commit.
+split_commits = false
+# An array of regex based parsers to modify commit messages prior to further processing.
+commit_preprocessors = [
+    # Remove gitmoji, both actual UTF emoji and :emoji:
+    { pattern = ' *(:\w+:|[\p{Emoji_Presentation}\p{Extended_Pictographic}](?:\u{FE0F})?\u{200D}?) *', replace = "" },
+    # Extract "closes #123" / "fixes #123" style references
+    { pattern = '(closes|fixes)\s+#([0-9]+)', replace = "(#${2})" },
+    # Replace issue numbers with link templates to be updated in changelog.postprocessors.
+    # { pattern = '\((\w+\s)?#([0-9]+)\)', replace = "([#${2}](<REPO>/issues/${2}))"},
+    # Check spelling of the commit message using https://github.com/crate-ci/typos.
+    # If the spelling is incorrect, it will be fixed automatically.
+    # { pattern = '.*', replace_command = 'typos --write-changes -' },
+]
+# An array of regex based parsers for extracting data from the commit message.
+# Assigns commits to groups.
+# Optionally sets the commit's scope and can decide to exclude commits from further processing.
+# NOTE: HTML comments are used for deterministic ordering of groups.
+commit_parsers = [
+    # Skip commits with an empty body
+    # { body = "$^", skip = true },
+    ### User-facing changes
+    # Breaking changes (explicitly flagged with ! or BREAKING CHANGE footer)
+    { breaking = true, group = "<!-- 0 -->Breaking Changes" },
+    # New features
+    { message = "^feat", group = "<!-- 1 -->Added" },
+    # Removals
+    { message = "^remove|^revert", group = "<!-- 2 -->Removed" },
+    # Refactors (user-visible API / behavior changes)
+    { message = "^refactor", group = "<!-- 3 -->Changed" },
+    # Bug fixes
+    { message = "^fix", group = "<!-- 4 -->Fixed" },
+    # Deprecations
+    { message = "^deprecate", group = "<!-- 5 -->Deprecated" },
+    # Dependency bumps (useful for security audits)
+    { message = "^chore\\(deps\\)", group = "<!-- 6 -->Dependencies" },
+    # Performance improvements
+    { message = "^perf", group = "<!-- 7 -->Performance" },
+    ### Developer-facing changes
+    # Skip changelog update commits
+    { message = "(?i)changelog", skip = true },
+    # Documentation
+    { message = "^docs", group = "<!-- 8 -->Documentation" },
+    # CI/CD pipeline changes
+    { message = "^chore\\(ci\\)", group = "<!-- 9 -->CI/CD" },
+    { message = "^ci", group = "<!-- 9 -->CI/CD" },
+    ### Skip (noise / internal tooling)
+    # test-only commits (implementation detail, not user-facing)
+    { message = "^test", skip = true },
+    # Makefile / build system changes
+    { message = "^chore\\(makefile\\)", skip = true },
+    # VS Code / editor config
+    { message = "^chore\\(vscode\\)", skip = true },
+    # Generic chore without meaningful user impact (logo, notices, release prep)
+    { message = "^chore", skip = true },
+    # Repository bootstrap commit
+    { message = "^root", skip = true },
+]
+# Prevent commits that are breaking from being excluded by commit parsers.
+protect_breaking_commits = true
+# An array of regex based parsers to extract links from the commit message and add them to the commit's context.
+link_parsers = []
+# Exclude commits that are not matched by any commit parser.
+filter_commits = false
+# Fail on a commit that is not matched by any commit parser.
+fail_on_unmatched_commit = false
+# Regex to select git tags that do not represent proper releases.
+tag_pattern = "v[0-9]*"
+# Regex to select git tags that do not represent proper releases.
+skip_tags = "v[0-9]+\\.[0-9]+\\.[0-9]+-(dev|test).*"
+# Regex to exclude git tags after applying tag_pattern (empty string matches all — leave commented when unused).
+# ignore_tags = "v[0-9]+\\.[0-9]+\\.[0-9]+-(rc|alpha|beta).*"
+# Regex to count matched tags (empty string matches all — leave commented when unused).
+# count_tags = "v[0-9]*"
+# Include only the tags that belong to the current branch.
+use_branch_tags = false
+# Order releases topologically instead of chronologically.
+topo_order = false
+# Order commits topologically instead of chronologically.
+topo_order_commits = true
+# Order of commits in each group/release within the changelog. Allowed values: newest, oldest
+sort_commits = "oldest"
+# Limit the total number of commits included in the changelog (omit or remove to include all).
+# limit_commits = 50
+# Process submodules commits
+recurse_submodules = false
+# Include related commits with changes at the specified paths.
+# include_paths = ""
+# Exclude unrelated commits with changes at the specified paths.
+# exclude_paths = ""
+
+[remote]
+# When true, do not make any HTTP requests to remotes (disables all enrichment)
+offline = true
+
+# [remote.github]
+# Owner of the remote.
+# owner = "MarwanAlsoltany"
+# Repository name.
+# repo = "amqp-broker"
+# Access token. Read from GIT_CLIFF__REMOTE__GITHUB__TOKEN env var instead
+# token = ""
+# Remote API URL. Only needed for GitHub Enterprise
+# api_url = "https://api.github.com"
+# Whether to use native TLS. Use native TLS instead of rustls
+# native_tls = false
+
+[bump]
+# When true, a feat commit always bumps minor (even under v0.x).
+# When false (default), feat under v0.x bumps patch instead.
+features_always_bump_minor = true
+# When true, a breaking change always bumps major (including 0.x -> 1.0).
+# When false (default), breaking under v0.x bumps minor instead.
+breaking_always_bump_major = true
+# The version to use if no tags exist yet (default: "0.1.0")
+initial_tag = "0.1.0"
+# Override the regex that triggers a major bump (matched against commit type only)
+# custom_major_increment_regex = "major|breaking"
+# Override the regex that triggers a minor bump (matched against commit type only)
+# custom_minor_increment_regex = "feat|minor"
+# Force a specific bump type regardless of commits: "major", "minor", or "patch"
+# bump_type = "minor"
