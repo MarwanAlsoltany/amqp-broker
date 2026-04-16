@@ -15,7 +15,8 @@ VERSION ?= latest
 .DEFAULT_GOAL := help
 
 .PHONY: help \
-	build test test-coverage test-integration lint format tidy check clean
+	build test test-coverage test-integration lint format tidy check clean \
+	changelog release
 
 # ---------------------
 
@@ -90,3 +91,17 @@ clean: ## Clean build artifacts
 	@echo "Cleaning ..."
 	go clean
 	rm -f coverage.*
+
+# ---------------------
+
+changelog: ## Generate CHANGELOG.md from conventional commits
+	@echo "Generating changelog ..."
+	git cliff --output CHANGELOG.md
+
+release: check-env-TAG ## Create a signed release tag (requires TAG=vX.X.X)
+	@echo "Preparing release $(TAG) ..."
+	git cliff --tag $(TAG) --output CHANGELOG.md
+	git add CHANGELOG.md
+	git diff --staged --quiet || git commit -S -m "docs: update CHANGELOG.md for $(TAG)"
+	git tag -s $(TAG) -m "$(TAG)"
+	@echo "Done. Push with: git push origin $$(git rev-parse --abbrev-ref HEAD) $(TAG)"
