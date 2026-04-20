@@ -12,23 +12,18 @@
   <a href="https://pkg.go.dev/github.com/MarwanAlsoltany/amqp-broker">
     <img src="https://pkg.go.dev/badge/github.com/MarwanAlsoltany/amqp-broker.svg" alt="Go Reference" />
   </a>
-  &nbsp;
   <a href="https://goreportcard.com/report/github.com/MarwanAlsoltany/amqp-broker">
     <img src="https://goreportcard.com/badge/github.com/MarwanAlsoltany/amqp-broker" alt="Go Report Card" />
   </a>
-  &nbsp;
   <a href="https://github.com/MarwanAlsoltany/amqp-broker/actions/workflows/ci.yml">
     <img src="https://github.com/MarwanAlsoltany/amqp-broker/actions/workflows/ci.yml/badge.svg?branch=master" alt="CI" />
   </a>
-  &nbsp;
   <a href="https://codecov.io/gh/MarwanAlsoltany/amqp-broker">
     <img src="https://codecov.io/gh/MarwanAlsoltany/amqp-broker/branch/master/graph/badge.svg" alt="Coverage" />
   </a>
-  &nbsp;
   <a href="https://github.com/MarwanAlsoltany/amqp-broker/releases/latest">
     <img src="https://img.shields.io/github/v/release/MarwanAlsoltany/amqp-broker?label=version&color=blue" alt="Latest Release" />
   </a>
-  &nbsp;
   <a href="https://github.com/MarwanAlsoltany/amqp-broker/blob/master/LICENSE">
     <img src="https://img.shields.io/github/license/MarwanAlsoltany/amqp-broker" alt="License" />
   </a>
@@ -602,6 +597,22 @@ make test-integration
 ```
 
 Test files follow the file they test, each file will have a corresponding `*_test.go` file and a `*_integration_test.go` file for integration tests (if applicable).
+
+---
+
+## Examples
+
+The [`examples/`](examples/) directory contains comprehensive examples as runnable programs covering every feature of the library; from basic publish/consume to advanced production patterns, all middleware, exchange patterns, and low-level APIs.
+
+```bash
+# run a single example
+cd examples/{some-example} && go run main.go
+
+# run all examples sequentially
+make examples
+```
+
+See [`examples/README.md`](examples/README.md) for the full index.
 
 ---
 
