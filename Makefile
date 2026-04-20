@@ -16,7 +16,7 @@ VERSION ?= latest
 
 .PHONY: help \
 	build test test-coverage test-integration lint format tidy check clean \
-	changelog release
+	changelog release examples
 
 # ---------------------
 
@@ -105,3 +105,6 @@ release: check-env-TAG ## Create a signed release tag (requires TAG=vX.X.X)
 	git diff --staged --quiet || git commit -S -m "docs: update CHANGELOG.md for $(TAG)"
 	git tag -s $(TAG) -m "$(TAG)"
 	@echo "Done. Push with: git push origin $$(git rev-parse --abbrev-ref HEAD) $(TAG)"
+
+examples: ## Run all examples sequentially
+	go run examples/main.go
