@@ -52,7 +52,7 @@ footer = """
 {%- else -%}
 [Unreleased]: {{ get_env(name="GITHUB_SERVER_URL", default="https://github.com") }}/{{ get_env(name="GITHUB_REPOSITORY", default="MarwanAlsoltany/amqp-broker") }}/compare/\
 {{ release.previous.version }}...HEAD
-{%- endif -%}
+{% endif -%}
 {%- endfor %}"""
 
 # Remove leading and trailing whitespaces from the changelog's body.
