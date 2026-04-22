@@ -381,15 +381,15 @@ func (p *publisher) monitor(ctx context.Context) error {
 
 // handleFlow processes flow control notifications from the server.
 func (p *publisher) handleFlow(ctx context.Context) {
+	p.stateMu.RLock()
+	flowCh := p.flowCh
+	p.stateMu.RUnlock()
+
+	if flowCh == nil {
+		return
+	}
+
 	for {
-		p.stateMu.RLock()
-		flowCh := p.flowCh
-		p.stateMu.RUnlock()
-
-		if flowCh == nil {
-			return
-		}
-
 		select {
 		case <-ctx.Done():
 			return
@@ -407,15 +407,15 @@ func (p *publisher) handleFlow(ctx context.Context) {
 
 // handleReturns processes undeliverable messages returned by the server.
 func (p *publisher) handleReturns(ctx context.Context) {
+	p.stateMu.RLock()
+	returnCh := p.returnCh
+	p.stateMu.RUnlock()
+
+	if returnCh == nil {
+		return
+	}
+
 	for {
-		p.stateMu.RLock()
-		returnCh := p.returnCh
-		p.stateMu.RUnlock()
-
-		if returnCh == nil {
-			return
-		}
-
 		select {
 		case <-ctx.Done():
 			return
@@ -436,26 +436,33 @@ func (p *publisher) handleReturns(ctx context.Context) {
 // message into confirmCh; values here are redundant, the actual result is obtained
 // via DeferredConfirmation.Wait()/WaitContext() by the OnConfirm callback.
 func (p *publisher) handleConfirmations(_ context.Context) {
+	// confirmCh is captured once before entering the loop so this goroutine never
+	// re-acquires stateMu; re-acquiring the read lock on every iteration would
+	// deadlock against endpoint.Close(), which holds the write lock while calling
+	// ch.Close(); ch.Close() in turn blocks waiting for channel.close-ok, which the
+	// broker only sends after the dispatcher has delivered all pending confirmations
+	// into confirmCh; if the buffer fills while the reader is blocked on the lock,
+	// the dispatcher stalls and ch.Close() hangs indefinitely
+	p.stateMu.RLock()
+	confirmCh := p.confirmCh
+	p.stateMu.RUnlock()
+
+	if confirmCh == nil {
+		return
+	}
+
 	for {
-		p.stateMu.RLock()
-		confirmCh := p.confirmCh
-		p.stateMu.RUnlock()
-
-		if confirmCh == nil {
-			return
-		}
-
 		select {
 		// NOTE: ctx.Done() is intentionally excluded from this select,
 		// returning early on cancellation would leave the amqp091-go dispatch loop
 		// unable to deliver any pending confirm, blocking it permanently and causing
 		// ch.Close() to deadlock waiting for channel.close-ok (reproduces as a
-		// X-minute timeout on slow runners)
-		// this goroutine must drain until amqp091-go itself closes confirmCh,
+		// X-minute timeout on slow runners);
+		// this goroutine must drain until amqp091-go closes confirmCh itself,
 		// which happens inside ch.Close(), if the buffer fills before that
 		// (see NotifyPublish comment in connect()), increase the buffer capacity
 		// case <-ctx.Done():
-		//	return
+		// 	return
 		case _, ok := <-confirmCh:
 			if !ok {
 				return

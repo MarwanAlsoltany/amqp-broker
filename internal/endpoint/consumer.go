@@ -359,15 +359,15 @@ func (c *consumer) monitor(ctx context.Context) error {
 
 // handleCancel processes consumer cancellation notifications from the server.
 func (c *consumer) handleCancel(ctx context.Context) {
+	c.stateMu.RLock()
+	cancelCh := c.cancelCh
+	c.stateMu.RUnlock()
+
+	if cancelCh == nil {
+		return
+	}
+
 	for {
-		c.stateMu.RLock()
-		cancelCh := c.cancelCh
-		c.stateMu.RUnlock()
-
-		if cancelCh == nil {
-			return
-		}
-
 		select {
 		case <-ctx.Done():
 			return
@@ -431,15 +431,15 @@ func (c *consumer) handleDeliveries(ctx context.Context) {
 		}
 	}
 
+	c.stateMu.RLock()
+	deliveryCh := c.deliveryCh
+	c.stateMu.RUnlock()
+
+	if deliveryCh == nil {
+		return
+	}
+
 	for {
-		c.stateMu.RLock()
-		deliveryCh := c.deliveryCh
-		c.stateMu.RUnlock()
-
-		if deliveryCh == nil {
-			return
-		}
-
 		select {
 		case <-ctx.Done():
 			return
