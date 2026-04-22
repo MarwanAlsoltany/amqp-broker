@@ -14,6 +14,14 @@ import (
 )
 
 func TestLoggingMiddleware(t *testing.T) {
+	// ensure default logger doesn't write to real stderr during tests
+	{
+		t.Helper()
+		logger := slog.Default()
+		slog.SetDefault(slog.New(slog.DiscardHandler))
+		t.Cleanup(func() { slog.SetDefault(logger) })
+	}
+
 	t.Run("LogsInfoAndSuccess", func(t *testing.T) {
 		var buf bytes.Buffer
 		logger := slog.New(slog.NewTextHandler(&buf, nil))
@@ -543,6 +551,14 @@ func TestMetricsMiddleware(t *testing.T) {
 }
 
 func TestDebugMiddleware(t *testing.T) {
+	// ensure default logger doesn't write to real stderr during tests
+	{
+		t.Helper()
+		logger := slog.Default()
+		slog.SetDefault(slog.New(slog.DiscardHandler))
+		t.Cleanup(func() { slog.SetDefault(logger) })
+	}
+
 	t.Run("LogsWithDefaultConfig", func(t *testing.T) {
 		var buf bytes.Buffer
 		logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))

@@ -13,6 +13,14 @@ import (
 )
 
 func TestRecoveryMiddleware(t *testing.T) {
+	// ensure default logger doesn't write to real stderr during tests
+	{
+		t.Helper()
+		logger := slog.Default()
+		slog.SetDefault(slog.New(slog.DiscardHandler))
+		t.Cleanup(func() { slog.SetDefault(logger) })
+	}
+
 	t.Run("RecoversPanicWithDefaultAction", func(t *testing.T) {
 		var buf bytes.Buffer
 		logger := slog.New(slog.NewTextHandler(&buf, nil))
