@@ -1,9 +1,7 @@
 package topology
 
 import (
-	"bytes"
 	"crypto/md5"
-	"encoding/gob"
 	"encoding/hex"
 	"fmt"
 	"slices"
@@ -278,20 +276,15 @@ func (tm *Registry) Sync(ch transport.Channel, t *Topology) error {
 	return err
 }
 
-// hash computes an MD5 hash of the given value. The value is encoded using gob before hashing.
-// If the value is nil, it hashes the string representation of nil.
+// hash computes an MD5 hash of the given value using its Go-syntax representation.
 // Returns the hash as a hexadecimal string.
 func hash(value interface{}) string {
-	var buffer bytes.Buffer
-
-	if value == nil {
-		fmt.Fprintf(&buffer, "%#v", value)
-	} else {
-		// safe to ignore error since value is expected to be gob-encodable
-		_ = gob.NewEncoder(&buffer).Encode(value)
-	}
-
-	hash := md5.Sum(buffer.Bytes())
-
-	return hex.EncodeToString(hash[:])
+	hash := md5.New()
+	// values and struct fields of type map are printed in sorted order by fmt,
+	// making the output deterministic regardless of map iteration order;
+	// %#v prints struct field names and quoted strings, preventing
+	// collisions between adjacent string fields
+	_, _ = fmt.Fprintf(hash, "%#v", value)
+	data := hash.Sum(nil)
+	return hex.EncodeToString(data)
 }
