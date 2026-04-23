@@ -3,7 +3,6 @@ package broker
 import (
 	"context"
 	"crypto/md5"
-	"encoding/gob"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -495,14 +494,7 @@ func (b *Broker) Publish(ctx context.Context, exchange, routingKey string, msg .
 
 	// use pooled publisher if enabled
 	if b.publishersPool != nil {
-		var hash string
-		{
-			h := md5.New()
-			_ = gob.NewEncoder(h).Encode(e) // safe to ignore, type wouldn't fail
-			hash = hex.EncodeToString(h.Sum(nil))
-		}
-
-		key := "publisher:" + hash
+		key := "publisher:" + hash(e)
 
 		publisher, release, err := b.publishersPool.acquire(key, func() (Publisher, error) {
 			return b.NewPublisher(nil, e)
@@ -587,4 +579,17 @@ func (b *Broker) Transaction(ctx context.Context, fn func(Channel) error) error 
 	}
 
 	return nil
+}
+
+// hash computes an MD5 hash of the given value using its Go-syntax representation.
+// Returns the hash as a hexadecimal string.
+func hash(value interface{}) string {
+	hash := md5.New()
+	// values and struct fields of type map are printed in sorted order by fmt,
+	// making the output deterministic regardless of map iteration order;
+	// %#v prints struct field names and quoted strings, preventing
+	// collisions between adjacent string fields
+	_, _ = fmt.Fprintf(hash, "%#v", value)
+	data := hash.Sum(nil)
+	return hex.EncodeToString(data)
 }
