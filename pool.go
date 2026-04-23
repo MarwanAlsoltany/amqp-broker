@@ -23,7 +23,8 @@ type pool[T any] struct {
 type poolItem[T any] struct {
 	value    T
 	refCount atomic.Int32
-	lastUsed atomic.Int64
+	idledAt  atomic.Int64
+	release  func() // stored once at construction
 }
 
 // newPool creates a new endpoint pool with the given TTL.
@@ -60,8 +61,8 @@ func (p *pool[T]) cleanup() error {
 	p.items.Range(func(k, v any) bool {
 		item := v.(*poolItem[T])
 		if item.refCount.Load() == 0 {
-			lastUsed := time.Unix(0, item.lastUsed.Load())
-			if time.Since(lastUsed) > p.ttl {
+			idledAt := time.Unix(0, item.idledAt.Load())
+			if time.Since(idledAt) > p.ttl {
 				if value, ok := any(item.value).(io.Closer); ok {
 					errs = append(errs, value.Close())
 				}
@@ -101,11 +102,7 @@ func (p *pool[T]) acquire(key string, factory func() (T, error)) (T, func(), err
 	if v, ok := p.items.Load(key); ok {
 		item := v.(*poolItem[T])
 		item.refCount.Add(1)
-		release := func() {
-			item.refCount.Add(-1)
-			item.lastUsed.Store(time.Now().UnixNano())
-		}
-		return item.value, release, nil
+		return item.value, item.release, nil
 	}
 
 	// slow path: create new
@@ -115,8 +112,16 @@ func (p *pool[T]) acquire(key string, factory func() (T, error)) (T, func(), err
 	}
 
 	item := &poolItem[T]{value: value}
-	item.refCount.Store(1)
-	item.lastUsed.Store(time.Now().UnixNano())
+	item.refCount.Store(1) // initial reference count
+	item.idledAt.Store(0)  // active, not idle yet
+	item.release = func() {
+		// idledAt is recorded only when the item transitions to fully idle (refCount
+		// reaches zero), avoiding redundant time.Now() calls while other callers
+		// still hold a reference and keeping the TTL timer semantically accurate
+		if item.refCount.Add(-1) == 0 {
+			item.idledAt.Store(time.Now().UnixNano())
+		}
+	}
 
 	// race-catcher: another goroutine may have created it
 	if actual, loaded := p.items.LoadOrStore(key, item); loaded {
@@ -126,17 +131,9 @@ func (p *pool[T]) acquire(key string, factory func() (T, error)) (T, func(), err
 		}
 		item = actual.(*poolItem[T])
 		item.refCount.Add(1)
-		release := func() {
-			item.refCount.Add(-1)
-			item.lastUsed.Store(time.Now().UnixNano())
-		}
-		return item.value, release, nil
+
+		return item.value, item.release, nil
 	}
 
-	release := func() {
-		item.refCount.Add(-1)
-		item.lastUsed.Store(time.Now().UnixNano())
-	}
-
-	return value, release, nil
+	return item.value, item.release, nil
 }

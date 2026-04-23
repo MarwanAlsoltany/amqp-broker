@@ -147,35 +147,31 @@ func TestPoolAcquire(t *testing.T) {
 		}
 	})
 
-	t.Run("UpdatesItemLastUsed", func(t *testing.T) {
+	t.Run("UpdatesItemIdledAt", func(t *testing.T) {
 		p := newPool[string](time.Minute)
 
-		before := time.Now()
 		key := "key"
 		value, release, err := p.acquire(key, func() (string, error) {
 			return "any", nil
 		})
 		require.NoError(t, err)
-		after := time.Now()
 
-		// check initial lastUsed is set
 		raw, _ := p.items.Load(key)
 		item := raw.(*poolItem[string])
-		lastUsed := time.Unix(0, item.lastUsed.Load())
-		assert.True(t, lastUsed.After(before) || lastUsed.Equal(before))
-		assert.True(t, lastUsed.Before(after) || lastUsed.Equal(after))
 
-		// wait a bit
+		// idledAt is zero until the item transitions to fully idle
+		assert.Equal(t, int64(0), item.idledAt.Load())
+
+		// wait a bit, then release; refCount drops to 0 so idledAt is recorded
 		time.Sleep(50 * time.Millisecond)
 
-		// release should update lastUsed
 		beforeRelease := time.Now()
 		release()
 		afterRelease := time.Now()
 
-		lastUsed = time.Unix(0, item.lastUsed.Load())
-		assert.True(t, lastUsed.After(beforeRelease) || lastUsed.Equal(beforeRelease))
-		assert.True(t, lastUsed.Before(afterRelease) || lastUsed.Equal(afterRelease))
+		idledAt := time.Unix(0, item.idledAt.Load())
+		assert.True(t, idledAt.After(beforeRelease) || idledAt.Equal(beforeRelease))
+		assert.True(t, idledAt.Before(afterRelease) || idledAt.Equal(afterRelease))
 
 		// suppress unused warning
 		_ = value
