@@ -11,6 +11,8 @@ import (
 	"os"
 	"regexp"
 	"strconv"
+	"sync"
+	"testing"
 	"time"
 
 	"github.com/stretchr/testify/suite"
@@ -21,6 +23,17 @@ import (
 func init() {
 	// replace testcontainers' default logger with no-op logger
 	tcLog.SetDefault(log.New(io.Discard, "", 0))
+}
+
+// rabbitmqImage returns the RabbitMQ Docker image tag for the given version string.
+// Defaults to v3 if version is empty or unrecognised.
+func rabbitmqImage(version string) string {
+	switch version {
+	case "4":
+		return "rabbitmq:4.2-alpine"
+	default:
+		return "rabbitmq:3.13-alpine"
+	}
 }
 
 // RabbitMQTestSuite provides a shared RabbitMQ container for integration tests.
@@ -53,17 +66,16 @@ func (s *RabbitMQTestSuite) SetupSuite() {
 		version = "3" // default to v3
 	}
 
-	var image string
 	switch version {
 	case "4":
-		image = "rabbitmq:4.2-alpine"
 		s.rabbitmqVersion = 4
 	case "3":
-		image = "rabbitmq:3.13-alpine"
 		s.rabbitmqVersion = 3
 	default:
 		t.Fatalf("unsupported RABBITMQ_VERSION: %s (use 3 or 4)", version)
 	}
+
+	image := rabbitmqImage(version)
 
 	t.Logf("Using RabbitMQ %q image", image)
 
@@ -128,4 +140,47 @@ func (s *RabbitMQTestSuite) GetRabbitMQVersion() (major, minor, patch string) {
 	}
 
 	return major, minor, patch
+}
+
+// rabbitmqBenchURL resolves the AMQP URL for benchmarks exactly once per
+// test binary run. Returns an empty string if no instance is available.
+var rabbitmqBenchURL = sync.OnceValue(func() string {
+	ctx := context.Background()
+
+	if url := os.Getenv("RABBITMQ_URL"); url != "" {
+		return url
+	}
+
+	c, err := rabbitmq.Run(ctx,
+		rabbitmqImage(os.Getenv("RABBITMQ_VERSION")),
+		rabbitmq.WithAdminUsername("admin"),
+		rabbitmq.WithAdminPassword("admin"),
+	)
+	if err != nil {
+		return ""
+	}
+
+	url, err := c.AmqpURL(ctx)
+	if err != nil {
+		return ""
+	}
+
+	time.Sleep(3 * time.Second) // wait for RabbitMQ to be ready
+
+	return url
+})
+
+// RabbitMQBenchmarkURL returns the AMQP URL of a shared RabbitMQ instance
+// for use in integration benchmarks. The instance is started at most once
+// per test binary run; subsequent calls reuse the same URL.
+// It respects the RABBITMQ_URL and RABBITMQ_VERSION environment variables
+// with the same semantics as RabbitMQTestSuite.
+// b is skipped if no RabbitMQ instance can be obtained.
+func RabbitMQBenchmarkURL(b *testing.B) string {
+	b.Helper()
+	if url := rabbitmqBenchURL(); url != "" {
+		return url
+	}
+	b.Skip("no RabbitMQ available: set RABBITMQ_URL or ensure Docker is running")
+	return ""
 }
