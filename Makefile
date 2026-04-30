@@ -15,7 +15,8 @@ VERSION ?= latest
 .DEFAULT_GOAL := help
 
 .PHONY: help \
-	build test test-coverage test-integration lint format tidy check clean \
+	build lint format tidy check clean \
+	test test-coverage test-integration bench bench-integration \
 	changelog release examples
 
 # ---------------------
@@ -61,9 +62,17 @@ test-coverage: ## Test the project with coverage report
 	go tool cover -html=coverage.out -o coverage.html
 
 test-integration: ## Test the project with integration tag and coverage report
-	@echo "Running integration tests ..."
+	@echo "Testing with integration and coverage ..."
 	go test -v -race -count=1 -tags=integration -coverprofile=coverage.out ./...
 	go tool cover -html=coverage.out -o coverage.html
+
+bench: ## Benchmark the project (unit benchmarks only)
+	@echo "Benchmarking ..."
+	go test -run='^$$' -bench=. -benchmem -count=1 ./...
+
+bench-integration: ## Benchmark the project with integration tag
+	@echo "Benchmarking with integration ..."
+	go test -run='^$$' -bench=. -benchmem -count=1 -tags=integration ./...
 
 lint: ## Lint the project
 	@echo "Linting ..."
