@@ -588,6 +588,8 @@ This allows for both broad and fine-grained error handling strategies, depending
 
 ## Testing
 
+The library ships with a comprehensive test suite covering all features and edge cases, with a mix of unit and integration tests. Unit tests use mocks for the transport layer to achieve high coverage without external dependencies. Integration tests run against a real RabbitMQ instance.
+
 ```bash
 # unit tests
 make test
@@ -597,6 +599,22 @@ make test-integration
 ```
 
 Test files follow the file they test, each file will have a corresponding `*_test.go` file and a `*_integration_test.go` file for integration tests (if applicable).
+
+## Benchmarks
+
+This library prioritizes developer experience over raw performance. It does not implement the AMQP protocol itself, it relies on [`amqp091-go`](https://github.com/rabbitmq/amqp091-go) (the official RabbitMQ Go client). The library's overhead sits on top of the protocol client and primarily reflects abstraction cost: connection pooling, topology hashing, middleware chains, and context propagation. Based on measurements so far, performance appears to be roughly on par with direct use of the underlying client for the common publish/consume paths.
+
+```bash
+# unit benchmarks (no external dependencies)
+make bench
+
+# integration benchmarks (requires Docker for RabbitMQ via testcontainers)
+make bench-integration
+```
+
+Benchmark files follow the same pattern as tests, with `*_bench_test.go` for unit benchmarks and `*_integration_bench_test.go` for integration benchmarks.
+
+> NOTE: For both tests and benchmarks, the `RABBITMQ_VERSION` environment variable controls which RabbitMQ version is used (`3` or `4`, default `3`). Alternatively, set `RABBITMQ_URL` to point at an existing instance.
 
 ---
 
