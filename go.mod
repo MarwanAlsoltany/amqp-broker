@@ -4,7 +4,7 @@ go 1.25.0
 
 require (
 	github.com/MarwanAlsoltany/serrors v0.1.0
-	github.com/rabbitmq/amqp091-go v1.10.0
+	github.com/rabbitmq/amqp091-go v1.11.0
 	github.com/stretchr/testify v1.11.1
 	github.com/testcontainers/testcontainers-go v0.42.0
 	github.com/testcontainers/testcontainers-go/modules/rabbitmq v0.42.0
