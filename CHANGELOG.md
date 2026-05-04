@@ -4,7 +4,31 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.0.1] - 2026-05-04
+
+### Added
+
+- **testing**
+  - Add RabbitMQBenchmarkURL helper for benchmarks
+
+### Fixed
+
+- **endpoint**
+  - Capture amqp notification channel refs once before loop to prevent deadlock
+
+### Dependencies
+
+- **deps**
+  - Update amqp091-go to v1.11.0
+
+### Performance
+
+- **broker**
+  - Extract hash helper and drop gob encoding for publisher pool keys
+- **pool**
+  - Pre-store release closure on item to eliminate fast-path allocation + refactor code to improve naming
+- **topology**
+  - Update hash helper to drop gob encoding for caching keys
 
 ### Documentation
 
@@ -25,6 +49,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   - Add advanced pattern examples
   - Add examples runner
   - Add examples README.md
+
+### CI/CD
+
+- **ci**
+  - Update CI workflow to add benchmark jobs and workflow_dispatch trigger
+  - Update CI workflow to add workflow_dispatch trigger
 
 ## [1.0.0] - 2026-04-16
 
@@ -224,6 +254,5 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   - Update package documentation
   - Enhance package documentation with detailed examples
 
-[Unreleased]: https://github.com/MarwanAlsoltany/amqp-broker/compare/v1.0.0...HEAD
-[1.0.0]: https://github.com/MarwanAlsoltany/amqp-broker/compare/v0.1.0...v1.0.0
+[1.0.1]: https://github.com/MarwanAlsoltany/amqp-broker/compare/v1.0.0...v1.0.1[1.0.0]: https://github.com/MarwanAlsoltany/amqp-broker/compare/v0.1.0...v1.0.0
 [0.1.0]: https://github.com/MarwanAlsoltany/amqp-broker/releases/tag/v0.1.0
