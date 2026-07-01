@@ -74,7 +74,7 @@ jobs:
 
       - name: Upload coverage
         if: matrix.go == 'stable' && matrix.rabbitmq == '3'
-        uses: codecov/codecov-action@v6
+        uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: coverage.out
